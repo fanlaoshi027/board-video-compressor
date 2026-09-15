@@ -1,0 +1,72 @@
+name: Build desktop apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: pip install pyinstaller
+      - name: Download static FFmpeg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          Invoke-WebRequest -Uri https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-src
+          $root = Get-ChildItem ffmpeg-src -Directory | Select-Object -First 1
+          Copy-Item "$($root.FullName)\bin\ffmpeg.exe" bin\ffmpeg.exe
+          Copy-Item "$($root.FullName)\bin\ffprobe.exe" bin\ffprobe.exe
+      - name: Build Windows app
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name "樊老师板书压缩器" --add-binary "bin/ffmpeg.exe;bin" --add-binary "bin/ffprobe.exe;bin" app.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: board-video-compressor-windows
+          path: dist/樊老师板书压缩器.exe
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: amd64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: pip install pyinstaller
+      - name: Download static FFmpeg
+        run: |
+          mkdir -p bin
+          curl -Lf "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.arch }}/release/ffmpeg.zip" -o ffmpeg.zip
+          curl -Lf "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.arch }}/release/ffprobe.zip" -o ffprobe.zip
+          unzip -q ffmpeg.zip -d ffmpeg-src
+          unzip -q ffprobe.zip -d ffprobe-src
+          find ffmpeg-src -type f -name ffmpeg -exec cp {} bin/ffmpeg \;
+          find ffprobe-src -type f -name ffprobe -exec cp {} bin/ffprobe \;
+          chmod +x bin/ffmpeg bin/ffprobe
+          ./bin/ffmpeg -version | head -n 1
+      - name: Build macOS app
+        run: pyinstaller --noconfirm --clean --windowed --name "樊老师板书压缩器" --add-binary "bin/ffmpeg:bin" --add-binary "bin/ffprobe:bin" app.py
+      - name: Create zip
+        run: cd dist && ditto -c -k --sequesterRsrc --keepParent "樊老师板书压缩器.app" "樊老师板书压缩器-${{ matrix.arch }}.zip"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: board-video-compressor-macos-${{ matrix.arch }}
+          path: dist/樊老师板书压缩器-${{ matrix.arch }}.zip
