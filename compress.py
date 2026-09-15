@@ -5,7 +5,7 @@
 - 可自定义输出帧率（如 15/20/24/30/60）
 - 可自定义分辨率，并可锁定原始宽高比
 - H.264 / H.265 / AV1
-- 智能反色：自动识别白底板书后反成黑底白字
+- 智能反色：仅反转黑白/低饱和度板书区域，彩色笔迹保持原色
 - 长 GOP + HEVC，让长时间静止、局部写字的画面更省空间
 """
 
@@ -128,7 +128,10 @@ def build_command(input_path: Path, output_path: Path, codec: str, preset_name: 
         assert size is not None
         vf.append(f"scale={size[0]}:{size[1]}:flags=lanczos")
     if invert == "on":
-        vf.append("negate")
+        # 只反转低饱和度（黑/白/灰）区域；高饱和度彩色笔迹保持原色。
+        # geq：根据 RGB 三通道差异近似判断饱和度，彩色区域直接保留原值，
+        # 低饱和度区域按亮度反转，白底目标约为 10% 亮度（约90%黑）。
+        vf.append("format=rgb24,geq=r='if(gt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),36),r(X,Y),255-r(X,Y)*0.9)':g='if(gt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),36),g(X,Y),255-g(X,Y)*0.9)':b='if(gt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),36),b(X,Y),255-b(X,Y)*0.9)',format=yuv420p")
 
     # 板书画面“长时间静止 + 局部写字”，适合较长 GOP，让编码器充分利用前后帧相似度。
     gop = max(30, target_fps * 5)
