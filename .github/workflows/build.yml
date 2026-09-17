@@ -25,12 +25,18 @@ jobs:
           $root = Get-ChildItem ffmpeg-src -Directory | Select-Object -First 1
           Copy-Item "$($root.FullName)\bin\ffmpeg.exe" bin\ffmpeg.exe
           Copy-Item "$($root.FullName)\bin\ffprobe.exe" bin\ffprobe.exe
+          .\bin\ffmpeg.exe -version
       - name: Build Windows EXE
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name "樊老师板书压缩器" --add-binary "bin/ffmpeg.exe;bin" --add-binary "bin/ffprobe.exe;bin" app.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name "BoardVideoCompressor" --add-binary "bin/ffmpeg.exe;bin" --add-binary "bin/ffprobe.exe;bin" app.py
+      - name: Verify Windows EXE
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist\BoardVideoCompressor.exe")) { throw "EXE was not created" }
+          Get-Item "dist\BoardVideoCompressor.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: board-video-compressor-windows-exe
-          path: dist/樊老师板书压缩器.exe
+          path: dist/BoardVideoCompressor.exe
 
   macos:
     strategy:
@@ -38,7 +44,7 @@ jobs:
       matrix:
         include:
           - runner: macos-13
-            arch: amd64
+            arch: x86_64
           - runner: macos-14
             arch: arm64
     runs-on: ${{ matrix.runner }}
@@ -49,27 +55,27 @@ jobs:
           python-version: '3.12'
       - name: Install build tools
         run: pip install pyinstaller
-      - name: Download static FFmpeg
+      - name: Install FFmpeg
         run: |
+          brew update
+          brew install ffmpeg
           mkdir -p bin
-          curl -Lf "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.arch }}/release/ffmpeg.zip" -o ffmpeg.zip
-          curl -Lf "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.arch }}/release/ffprobe.zip" -o ffprobe.zip
-          unzip -q ffmpeg.zip -d ffmpeg-src
-          unzip -q ffprobe.zip -d ffprobe-src
-          find ffmpeg-src -type f -name ffmpeg -exec cp {} bin/ffmpeg \;
-          find ffprobe-src -type f -name ffprobe -exec cp {} bin/ffprobe \;
+          cp "$(brew --prefix ffmpeg)/bin/ffmpeg" bin/ffmpeg
+          cp "$(brew --prefix ffmpeg)/bin/ffprobe" bin/ffprobe
           chmod +x bin/ffmpeg bin/ffprobe
           ./bin/ffmpeg -version | head -n 1
       - name: Build macOS app
-        run: pyinstaller --noconfirm --clean --windowed --name "樊老师板书压缩器" --add-binary "bin/ffmpeg:bin" --add-binary "bin/ffprobe:bin" app.py
+        run: pyinstaller --noconfirm --clean --windowed --name "BoardVideoCompressor" --add-binary "bin/ffmpeg:bin" --add-binary "bin/ffprobe:bin" app.py
       - name: Create DMG
         run: |
           mkdir -p dmg-root
-          cp -R "dist/樊老师板书压缩器.app" dmg-root/
+          cp -R "dist/BoardVideoCompressor.app" dmg-root/
           ln -s /Applications dmg-root/Applications
-          hdiutil create -volname "樊老师板书压缩器" -srcfolder dmg-root -ov -format UDZO "dist/樊老师板书压缩器-${{ matrix.arch }}.dmg"
+          hdiutil create -volname "樊老师板书压缩器" -srcfolder dmg-root -ov -format UDZO "dist/BoardVideoCompressor-${{ matrix.arch }}.dmg"
+      - name: Verify DMG
+        run: test -f "dist/BoardVideoCompressor-${{ matrix.arch }}.dmg"
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: board-video-compressor-macos-${{ matrix.arch }}-dmg
-          path: dist/樊老师板书压缩器-${{ matrix.arch }}.dmg
+          path: dist/BoardVideoCompressor-${{ matrix.arch }}.dmg
