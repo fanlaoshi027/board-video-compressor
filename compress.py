@@ -37,6 +37,7 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
             else: height=round(width/ratio)
         elif width: height=round(width/ratio)
         elif height: width=round(height*ratio)
+    if width is None or height is None: raise ValueError("宽度和高度必须至少指定一个")
     return max(2,width-width%2),max(2,height-height%2)
 
 def _gray_invert_filter():
@@ -47,8 +48,6 @@ def _gray_invert_filter():
       "b='if(lt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),84,255-b(X,Y)*0.9,b(X,Y))'")
 
 def _board_filter():
-    # 板书模式：轻度提高清晰边缘与局部对比，避免重度锐化造成文字边缘光晕。
-    # unsharp 参数保持克制，主要用于压缩前保护细线；不改变色彩。
     return "unsharp=5:5:0.45:5:5:0"
 
 def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,height=None,keep_aspect=True,invert="off",src_w=None,src_h=None,encoder=None,ffmpeg="ffmpeg",board_optimized=True):
@@ -68,7 +67,7 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     elif encoder in {"hevc_videotoolbox","h264_videotoolbox"}:
         quality={"board-high":58,"board-balanced":48,"board-extreme":38}[preset_name]
         cmd += ["-q:v",str(quality)]
-    cmd += ["-g",str(gop),"-keyint_min",str(max(1,int(target_fps)),),"-pix_fmt","yuv420p","-c:a","aac","-b:a","64k","-movflags","+faststart",str(output_path)]
+    cmd += ["-g",str(gop),"-keyint_min",str(max(1,int(target_fps))),"-pix_fmt","yuv420p","-c:a","aac","-b:a","64k","-movflags","+faststart",str(output_path)]
     return cmd
 
 def main():
