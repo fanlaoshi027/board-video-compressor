@@ -3,8 +3,8 @@ name: Build desktop apps
 on:
   workflow_dispatch:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
 
 jobs:
   windows:
@@ -25,12 +25,11 @@ jobs:
           $root = Get-ChildItem ffmpeg-src -Directory | Select-Object -First 1
           Copy-Item "$($root.FullName)\bin\ffmpeg.exe" bin\ffmpeg.exe
           Copy-Item "$($root.FullName)\bin\ffprobe.exe" bin\ffprobe.exe
-      - name: Build Windows app
+      - name: Build Windows EXE
         run: pyinstaller --noconfirm --clean --onefile --windowed --name "樊老师板书压缩器" --add-binary "bin/ffmpeg.exe;bin" --add-binary "bin/ffprobe.exe;bin" app.py
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: board-video-compressor-windows
+          name: board-video-compressor-windows-exe
           path: dist/樊老师板书压缩器.exe
 
   macos:
@@ -54,6 +53,7 @@ jobs:
         run: |
           mkdir -p bin
           curl -Lf "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.arch }}/release/ffmpeg.zip" -o ffmpeg.zip
+          curl -Lf "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.arch }}/release/ffmpeg.zip" -o ffmpeg.zip
           curl -Lf "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.arch }}/release/ffprobe.zip" -o ffprobe.zip
           unzip -q ffmpeg.zip -d ffmpeg-src
           unzip -q ffprobe.zip -d ffprobe-src
@@ -63,10 +63,14 @@ jobs:
           ./bin/ffmpeg -version | head -n 1
       - name: Build macOS app
         run: pyinstaller --noconfirm --clean --windowed --name "樊老师板书压缩器" --add-binary "bin/ffmpeg:bin" --add-binary "bin/ffprobe:bin" app.py
-      - name: Create zip
-        run: cd dist && ditto -c -k --sequesterRsrc --keepParent "樊老师板书压缩器.app" "樊老师板书压缩器-${{ matrix.arch }}.zip"
-      - name: Upload artifact
+      - name: Create DMG
+        run: |
+          mkdir -p dmg-root
+          cp -R "dist/樊老师板书压缩器.app" dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname "樊老师板书压缩器" -srcfolder dmg-root -ov -format UDZO "dist/樊老师板书压缩器-${{ matrix.arch }}.dmg"
+      - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: board-video-compressor-macos-${{ matrix.arch }}
-          path: dist/樊老师板书压缩器-${{ matrix.arch }}.zip
+          name: board-video-compressor-macos-${{ matrix.arch }}-dmg
+          path: dist/樊老师板书压缩器-${{ matrix.arch }}.dmg
