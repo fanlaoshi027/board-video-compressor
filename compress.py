@@ -109,11 +109,11 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
 
 
 def _smart_invert_filter():
-    """彩色保持原色；近灰白区域反色。白色 255 -> 约 26，黑色 0 -> 255。"""
-    er="if(gt(max(max(r(X,Y),g(X,Y)),b(X,Y))-min(min(r(X,Y),g(X,Y)),b(X,Y)),18),r(X,Y),255-0.9*r(X,Y))"
-    eg="if(gt(max(max(r(X,Y),g(X,Y)),b(X,Y))-min(min(r(X,Y),g(X,Y)),b(X,Y)),18),g(X,Y),255-0.9*g(X,Y))"
-    eb="if(gt(max(max(r(X,Y),g(X,Y)),b(X,Y))-min(min(r(X,Y),g(X,Y)),b(X,Y)),18),b(X,Y),255-0.9*b(X,Y))"
-    return f"format=rgb24,geq=r='{er}':g='{eg}':b='{eb}'"
+    """快速板书反色：只反转 Y(亮度)分量，保持 U/V 色度不变。
+    白色(约Y=235) -> 约Y=20（接近90%黑），黑色 -> 白色；
+    彩色笔迹的色相/饱和度保持不变。只使用 FFmpeg negate 的原生 C 滤镜，
+    避免逐像素 geq/lutrgb 带来的巨大 CPU 开销。"""
+    return "negate=components=1"
 
 
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
@@ -161,7 +161,6 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     cuts=cuts or []
     if cuts:
         graph=_cut_filter(cuts,float(duration),has_audio=has_audio)
-        # Apply the same video processing after the cut/concat graph so timestamps remain continuous.
         post=','.join(vf) if vf else "null"
         graph += f";[outv]{post}[vout]"
         cmd=[ffmpeg,"-hide_banner","-y","-i",str(input_path),"-filter_complex",graph,"-map","[vout]"]
