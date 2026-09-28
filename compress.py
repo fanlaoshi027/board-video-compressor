@@ -19,41 +19,95 @@ def require_binary(name):
         raise SystemExit(f"找不到 {name}。请确认 FFmpeg 已内置或已加入 PATH。")
 
 
+def _guess_ffmpeg_from_ffprobe(ffprobe: str):
+    p=Path(ffprobe)
+    if p.parent != Path('.'):
+        name="ffmpeg.exe" if p.suffix.lower()==".exe" else "ffmpeg"
+        candidate=p.with_name(name)
+        if candidate.exists():
+            return str(candidate)
+    return "ffmpeg"
+
+
 def _ffmpeg_fallback_probe(path: Path, ffprobe: str, ffmpeg: str | None = None):
-    """Windows 下 FFprobe 异常时，用 FFmpeg 的输入探测作为可靠后备。"""
-    if ffmpeg is None:
-        p=Path(ffprobe)
-        ffmpeg=str(p.with_name("ffmpeg.exe" if p.suffix.lower()==".exe" else "ffmpeg")) if p.parent != Path('.') else "ffmpeg"
-    r=subprocess.run([ffmpeg,"-hide_banner","-i",str(path)],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30)
+    """FFprobe 无法启动/返回数据时，用同目录 FFmpeg 探测视频。"""
+    ffmpeg=ffmpeg or _guess_ffmpeg_from_ffprobe(ffprobe)
+    try:
+        r=subprocess.run(
+            [ffmpeg,"-hide_banner","-i",str(path)],
+            capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30
+        )
+    except (OSError,subprocess.SubprocessError) as e:
+        raise RuntimeError(f"FFprobe 和 FFmpeg 都无法启动：{e}") from e
+
     text=(r.stderr or "")+(r.stdout or "")
-    m=re.search(r"Video:.*?\s(\d{2,5})x(\d{2,5})(?:[\s,]|$)",text,re.I)
-    if not m:
-        raise RuntimeError(f"FFprobe/FFmpeg 都无法读取视频信息。FFmpeg 输出：{text[-1200:].strip()}")
-    w,h=int(m.group(1)),int(m.group(2))
+
+    # 典型 FFmpeg 输出：Video: h264 ..., 1920x1080, ...
+    video_lines=[line for line in text.splitlines() if "Video:" in line]
+    dimensions=[]
+    for line in video_lines:
+        dimensions.extend(re.findall(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)",line))
+    if not dimensions:
+        dimensions=re.findall(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)",text)
+    if not dimensions:
+        raise RuntimeError(f"FFprobe/FFmpeg 都无法读取视频信息。FFmpeg 输出：{text[-1600:].strip()}")
+
+    # 优先使用视频流行中的最后一个合理尺寸，避免把音频/其他数字误认为分辨率。
+    w,h=map(int,dimensions[-1])
     fps=30.0
-    fm=re.search(r"(\d+(?:\.\d+)?)\s*fps",text,re.I)
+    fm=re.search(r"(?:,|\s)(\d+(?:\.\d+)?)\s*fps(?:,|\s|$)",text,re.I)
     if fm:
-        fps=float(fm.group(1))
+        try: fps=float(fm.group(1))
+        except ValueError: pass
+
     duration=0.0
     dm=re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",text,re.I)
     if dm:
         duration=int(dm.group(1))*3600+int(dm.group(2))*60+float(dm.group(3))
-    return {"streams":[{"codec_type":"video","width":w,"height":h,"avg_frame_rate":f"{int(round(fps*1000))}/1000"}],"format":{"duration":str(duration)}}
+
+    return {
+        "streams":[{
+            "codec_type":"video",
+            "width":w,
+            "height":h,
+            "avg_frame_rate":f"{int(round(fps*1000))}/1000",
+            "r_frame_rate":f"{int(round(fps*1000))}/1000",
+        }],
+        "format":{"duration":str(duration)},
+    }
 
 
 def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
+    """读取视频信息；FFprobe 任何异常都自动降级到 FFmpeg。"""
     path=Path(path)
-    p=subprocess.run([ffprobe,"-v","error","-select_streams","v:0","-show_entries","stream=codec_name,width,height,avg_frame_rate,r_frame_rate","-show_entries","format=duration","-of","json",str(path)],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30)
-    raw=(p.stdout or "").strip()
-    if p.returncode == 0 and raw:
-        try:
-            data=json.loads(raw)
-            streams=data.get("streams") or []
-            if streams and streams[0].get("width") and streams[0].get("height"):
-                return data
-        except json.JSONDecodeError:
-            pass
-    return _ffmpeg_fallback_probe(path,ffprobe,ffmpeg)
+    ffmpeg=ffmpeg or _guess_ffmpeg_from_ffprobe(ffprobe)
+    probe_error=""
+    try:
+        p=subprocess.run(
+            [ffprobe,"-v","error","-select_streams","v:0",
+             "-show_entries","stream=codec_name,width,height,avg_frame_rate,r_frame_rate",
+             "-show_entries","format=duration","-of","json",str(path)],
+            capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30
+        )
+        raw=(p.stdout or "").strip()
+        if p.returncode == 0 and raw:
+            try:
+                data=json.loads(raw)
+                streams=data.get("streams") or []
+                if streams and streams[0].get("width") and streams[0].get("height"):
+                    return data
+                probe_error=f"FFprobe 返回空视频流，stderr={p.stderr[-800:]}"
+            except json.JSONDecodeError as e:
+                probe_error=f"FFprobe JSON 无法解析：{e}"
+        else:
+            probe_error=f"FFprobe 返回码={p.returncode}，stderr={(p.stderr or '')[-800:]}"
+    except (OSError,subprocess.SubprocessError) as e:
+        probe_error=f"FFprobe 无法启动：{e}"
+
+    try:
+        return _ffmpeg_fallback_probe(path,ffprobe,ffmpeg)
+    except Exception as e:
+        raise RuntimeError(f"{probe_error}; FFmpeg 后备探测失败：{e}") from e
 
 
 def available_encoders(ffmpeg="ffmpeg"):
