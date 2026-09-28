@@ -2,37 +2,13 @@
 """Windows EXE 启动入口。"""
 from __future__ import annotations
 
-import subprocess
+import app as _app
+from preview_player import ReliablePreviewWindow
 
-# 预览使用 rawvideo 管道时，必须按实时速度输出。
-# 否则 FFmpeg 会尽可能快地解码，播放器看起来会“倍速播放”，
-# 拖动、暂停和时间指针也会跟不上。单帧定位不加 -re，保证定位仍然迅速。
-_original_popen = subprocess.Popen
-
-
-def _preview_realtime_popen(*args, **kwargs):
-    if args and isinstance(args[0], (list, tuple)):
-        cmd = list(args[0])
-        is_raw_preview = (
-            "-f" in cmd
-            and "rawvideo" in cmd
-            and "pipe:1" in cmd
-            and "-i" in cmd
-            and "-frames:v" not in cmd
-        )
-        if is_raw_preview and "-re" not in cmd:
-            try:
-                i = cmd.index("-i")
-                cmd.insert(i, "-re")
-                args = (cmd, *args[1:])
-            except ValueError:
-                pass
-    return _original_popen(*args, **kwargs)
-
-
-subprocess.Popen = _preview_realtime_popen
-
-from app import App
+# 只替换预览窗口，不改压缩主流程。
+# 这样可以在不构建 EXE 的情况下持续测试预览逻辑。
+_app.PreviewWindow = ReliablePreviewWindow
+App = _app.App
 
 if __name__ == "__main__":
     App().mainloop()
