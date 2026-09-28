@@ -1,4 +1,4 @@
-name: Build desktop apps
+name: Build Windows app
 
 on:
   workflow_dispatch:
@@ -10,13 +10,18 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Install build tools
         run: python -m pip install --upgrade pip pyinstaller
-      - name: Download static FFmpeg
+
+      - name: Download FFmpeg
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path bin | Out-Null
@@ -26,59 +31,21 @@ jobs:
           if (!(Test-Path "$($root.FullName)\bin\ffmpeg.exe")) { throw "FFmpeg binary missing" }
           Copy-Item "$($root.FullName)\bin\ffmpeg.exe" bin\ffmpeg.exe
           Copy-Item "$($root.FullName)\bin\ffprobe.exe" bin\ffprobe.exe
+
       - name: Validate Python sources
         run: python -m py_compile app.py compress.py size_estimator.py gpu_detect.py
+
       - name: Build Windows EXE
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name BoardVideoCompressor --add-binary "bin/ffmpeg.exe;bin" --add-binary "bin/ffprobe.exe;bin" app.py
+
       - name: Verify Windows EXE
         shell: pwsh
         run: |
           if (!(Test-Path "dist\BoardVideoCompressor.exe")) { throw "EXE was not created" }
           Get-Item "dist\BoardVideoCompressor.exe"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: board-video-compressor-windows-exe
-          path: dist/BoardVideoCompressor.exe
 
-  macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-13
-            arch: x86_64
-          - runner: macos-14
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
         with:
-          python-version: '3.12'
-      - name: Install build tools
-        run: python -m pip install --upgrade pip pyinstaller
-      - name: Install FFmpeg
-        run: |
-          brew install ffmpeg
-          mkdir -p bin
-          cp "$(brew --prefix ffmpeg)/bin/ffmpeg" bin/ffmpeg
-          cp "$(brew --prefix ffmpeg)/bin/ffprobe" bin/ffprobe
-          chmod +x bin/ffmpeg bin/ffprobe
-      - name: Validate Python sources
-        run: python -m py_compile app.py compress.py size_estimator.py gpu_detect.py
-      - name: Build macOS app
-        run: python -m PyInstaller --noconfirm --clean --windowed --name BoardVideoCompressor --add-binary "bin/ffmpeg:bin" --add-binary "bin/ffprobe:bin" app.py
-      - name: Verify app
-        run: test -d "dist/BoardVideoCompressor.app"
-      - name: Create DMG
-        run: |
-          mkdir -p dmg-root
-          cp -R "dist/BoardVideoCompressor.app" dmg-root/
-          ln -s /Applications dmg-root/Applications
-          hdiutil create -volname "樊老师板书压缩器" -srcfolder dmg-root -ov -format UDZO "dist/BoardVideoCompressor-${{ matrix.arch }}.dmg"
-      - name: Verify DMG
-        run: test -f "dist/BoardVideoCompressor-${{ matrix.arch }}.dmg"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: board-video-compressor-macos-${{ matrix.arch }}-dmg
-          path: dist/BoardVideoCompressor-${{ matrix.arch }}.dmg
+          name: board-video-compressor-windows
+          path: dist/BoardVideoCompressor.exe
