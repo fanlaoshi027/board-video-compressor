@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""樊老师板书视频压缩器 - 跨平台板书压缩核心。"""
+"""樊老师板书压缩器 - Windows / macOS GUI 压缩核心。"""
 from __future__ import annotations
 import argparse, json, shutil, subprocess
 from pathlib import Path
@@ -17,13 +17,31 @@ def require_binary(name):
     if shutil.which(name) is None: raise SystemExit(f"找不到 {name}。请确认 FFmpeg 已内置或已加入 PATH。")
 
 def probe(path:Path,ffprobe="ffprobe"):
-    r=subprocess.run([ffprobe,"-v","error","-print_format","json","-show_format","-show_streams",str(path)],capture_output=True,text=True,check=True)
-    return json.loads(r.stdout)
+    """读取视频信息。Windows 打包版尤其要把 ffprobe 的失败信息完整返回。"""
+    try:
+        r=subprocess.run(
+            [ffprobe,"-v","error","-print_format","json","-show_format","-show_streams",str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", check=False
+        )
+    except OSError as e:
+        raise RuntimeError(f"无法启动 FFprobe：{ffprobe}\n{e}") from e
+    stdout=(r.stdout or "").strip()
+    stderr=(r.stderr or "").strip()
+    if r.returncode != 0:
+        raise RuntimeError(f"FFprobe 读取视频失败（返回码 {r.returncode}）：{stderr or '没有错误输出'}")
+    if not stdout:
+        raise RuntimeError(f"FFprobe 没有返回视频信息。{stderr}")
+    try:
+        return json.loads(stdout)
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
+        preview=stdout[:500].replace("\n"," ")
+        raise RuntimeError(f"FFprobe 返回的数据不是有效 JSON：{e}\n返回内容：{preview}") from e
 
 def available_encoders(ffmpeg="ffmpeg"):
     try:
         p=subprocess.run([ffmpeg,"-hide_banner","-encoders"],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=10)
-        text=p.stdout+p.stderr
+        text=(p.stdout or "")+(p.stderr or "")
         return {n for n in set(HARDWARE_CODECS.values())|set(CODECS.values()) if n in text}
     except (OSError,subprocess.SubprocessError): return set()
 
@@ -41,7 +59,6 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     return max(2,width-width%2),max(2,height-height%2)
 
 def _gray_invert_filter():
-    # 低饱和度黑/白/灰反色；彩色笔迹保持原色。
     return ("lutrgb="
       "r='if(lt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),84,255-r(X,Y)*0.9,r(X,Y))':"
       "g='if(lt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),84,255-g(X,Y)*0.9,g(X,Y))':"
