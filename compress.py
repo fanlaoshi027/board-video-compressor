@@ -8,6 +8,12 @@ from size_estimator import estimate_output_size, format_bytes
 PRESETS={"board-high":{"crf":24,"fps":30,"preset":"slow"},"board-balanced":{"crf":27,"fps":15,"preset":"slow"},"board-extreme":{"crf":30,"fps":15,"preset":"slow"}}
 CODECS={"h264":"libx264","h265":"libx265","av1":"libsvtav1"}; HARDWARE_CODECS={"h264_qsv":"h264_qsv","hevc_qsv":"hevc_qsv","av1_qsv":"av1_qsv"}
 
+def _hidden_kwargs():
+    if __import__('sys').platform.startswith('win'):
+        si=subprocess.STARTUPINFO(); si.dwFlags |= subprocess.STARTF_USESHOWWINDOW; si.wShowWindow=0
+        return {"startupinfo":si,"creationflags":subprocess.CREATE_NO_WINDOW}
+    return {}
+
 def require_binary(name):
     if shutil.which(name) is None: raise SystemExit(f"找不到 {name}。请确认 FFmpeg 已内置或已加入 PATH。")
 
@@ -34,7 +40,7 @@ def _parse_ffmpeg_video_info(text: str):
 
 def _ffmpeg_fallback_probe(path: Path, ffprobe: str, ffmpeg: str | None = None):
     ffmpeg=ffmpeg or _guess_ffmpeg_from_ffprobe(ffprobe)
-    try:r=subprocess.run([ffmpeg,"-hide_banner","-loglevel","info","-i",str(path),"-map","0:v:0","-frames:v","1","-f","null","-"],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=45)
+    try:r=subprocess.run([ffmpeg,"-hide_banner","-loglevel","info","-i",str(path),"-map","0:v:0","-frames:v","1","-f","null","-"],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=45,**_hidden_kwargs())
     except (OSError,subprocess.SubprocessError) as e:raise RuntimeError(f"FFmpeg 无法启动：{e}") from e
     text=(r.stderr or "")+(r.stdout or ""); parsed=_parse_ffmpeg_video_info(text)
     if not parsed:raise RuntimeError(f"FFmpeg 无法识别视频。返回码={r.returncode}\nFFmpeg 输出：\n{text[-5000:].strip()}")
@@ -45,7 +51,7 @@ def _ffmpeg_fallback_probe(path: Path, ffprobe: str, ffmpeg: str | None = None):
 def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
     path=Path(path); ffmpeg=ffmpeg or _guess_ffmpeg_from_ffprobe(ffprobe); probe_error=""
     try:
-        p=subprocess.run([ffprobe,"-v","error","-show_streams","-show_format","-of","json",str(path)],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30); raw=(p.stdout or "").strip()
+        p=subprocess.run([ffprobe,"-v","error","-show_streams","-show_format","-of","json",str(path)],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30,**_hidden_kwargs()); raw=(p.stdout or "").strip()
         if p.returncode==0 and raw:
             try:
                 data=json.loads(raw); streams=data.get("streams") or []; video=next((s for s in streams if s.get("codec_type")=="video"),None)
@@ -59,7 +65,7 @@ def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
 
 def available_encoders(ffmpeg="ffmpeg"):
     try:
-        p=subprocess.run([ffmpeg,"-hide_banner","-encoders"],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=10); text=(p.stdout or "")+(p.stderr or "")
+        p=subprocess.run([ffmpeg,"-hide_banner","-encoders"],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=10,**_hidden_kwargs()); text=(p.stdout or "")+(p.stderr or "")
         return {n for n in set(HARDWARE_CODECS.values())|set(CODECS.values()) if n in text}
     except (OSError,subprocess.SubprocessError):return set()
 
@@ -76,8 +82,7 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     return max(2,width-width%2),max(2,height-height%2)
 
 def _smart_invert_filter():
-    # 板书只保留少数颜色：黑、红、蓝、绿；白底变约90%黑。
-    # 先在 YUV 中只反转亮度，避免 RGB 全通道反色导致彩色笔迹变补色。
+    # 板书场景：白底转约90%黑，黑字转白；保持色度通道，避免彩色变补色。
     return "lutyuv=y='235-(val*235/255)':u='val':v='val'"
 
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
@@ -116,10 +121,10 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     if qsv:vf.append("format=nv12")
     gop=max(30,int(target_fps*5)); vf_expr=','.join(vf) if vf else "null"; pix_fmt="nv12" if qsv else "yuv420p"; cuts=cuts or []
     if cuts:
-        graph=_cut_filter(cuts,float(duration),has_audio=has_audio); post=','.join(vf) if vf else "null"; graph+=f";[outv]{post}[vout]"; cmd=[ffmpeg,"-hide_banner","-y","-i",str(input_path),"-filter_complex",graph,"-map","[vout]"]
+        graph=_cut_filter(cuts,float(duration),has_audio=has_audio); post=','.join(vf) if vf else "null"; graph+=f";[outv]{post}[vout]"; cmd=[ffmpeg,"-hide_banner","-loglevel","error","-y","-i",str(input_path),"-filter_complex",graph,"-map","[vout]"]
         if has_audio:cmd += ["-map","[outa]"]
     else:
-        cmd=[ffmpeg,"-hide_banner","-y","-i",str(input_path),"-map","0:v:0"]
+        cmd=[ffmpeg,"-hide_banner","-loglevel","error","-y","-i",str(input_path),"-map","0:v:0"]
         if has_audio:cmd += ["-map","0:a?"]
         cmd += ["-vf",vf_expr,"-r",str(target_fps),"-fps_mode","cfr"]
     cmd += ["-c:v",encoder]
@@ -133,11 +138,11 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     return cmd
 
 def compress_video(src,dst,width,height,fps,codec="hevc_qsv",bitrate="2M",smart_invert=False,cuts=None,duration=0,has_audio=True):
-    cmd=build_command(src,dst,codec,"board-balanced",fps=fps,width=width,height=height,keep_aspect=True,invert=smart_invert,encoder=codec,ffmpeg="ffmpeg",cuts=cuts,duration=duration,has_audio=has_audio); return subprocess.run(cmd,capture_output=True,text=True,encoding="utf-8",errors="replace")
+    cmd=build_command(src,dst,codec,"board-balanced",fps=fps,width=width,height=height,keep_aspect=True,invert=smart_invert,encoder=codec,ffmpeg="ffmpeg",cuts=cuts,duration=duration,has_audio=has_audio); return subprocess.run(cmd,capture_output=True,text=True,encoding="utf-8",errors="replace",**_hidden_kwargs())
 
 def main():
     parser=argparse.ArgumentParser(description="樊老师板书压缩器"); parser.add_argument("input"); parser.add_argument("--preset",choices=PRESETS,default="board-balanced"); parser.add_argument("--codec",choices=CODECS,default="h265"); parser.add_argument("--fps",type=int,choices=[15,20,24,25,30,50,60]); parser.add_argument("--output"); a=parser.parse_args(); require_binary("ffmpeg"); src=Path(a.input).resolve(); out=Path(a.output).resolve() if a.output else src.with_name(src.stem+"_压缩.mp4"); info=probe(src); v=next(s for s in info["streams"] if s.get("codec_type")=="video"); encs=available_encoders(); enc=CODECS[a.codec]
     if a.codec=="h265" and "hevc_qsv" in encs:enc="hevc_qsv"
     if a.codec=="av1" and "av1_qsv" in encs:enc="av1_qsv"
-    has_audio=any(s.get("codec_type")=="audio" for s in info.get("streams",[])); subprocess.run(build_command(src,out,a.codec,a.preset,fps=a.fps,src_w=int(v["width"]),src_h=int(v["height"]),encoder=enc,has_audio=has_audio,duration=float(info.get("format",{}).get("duration") or 0)),check=True)
+    has_audio=any(s.get("codec_type")=="audio" for s in info.get("streams",[])); subprocess.run(build_command(src,out,a.codec,a.preset,fps=a.fps,src_w=int(v["width"]),src_h=int(v["height"]),encoder=enc,has_audio=has_audio,duration=float(info.get("format",{}).get("duration") or 0)),check=True,**_hidden_kwargs())
 if __name__=="__main__":main()
