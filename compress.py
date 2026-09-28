@@ -4,16 +4,20 @@ from __future__ import annotations
 import argparse, json, re, shutil, subprocess
 from pathlib import Path
 from size_estimator import estimate_output_size, format_bytes
+
 PRESETS={"board-high":{"crf":24,"fps":30,"preset":"slow"},"board-balanced":{"crf":27,"fps":15,"preset":"slow"},"board-extreme":{"crf":30,"fps":15,"preset":"slow"}}
 CODECS={"h264":"libx264","h265":"libx265","av1":"libsvtav1"}; HARDWARE_CODECS={"h264_qsv":"h264_qsv","hevc_qsv":"hevc_qsv","av1_qsv":"av1_qsv"}
+
 def require_binary(name):
     if shutil.which(name) is None: raise SystemExit(f"找不到 {name}。请确认 FFmpeg 已内置或已加入 PATH。")
+
 def _guess_ffmpeg_from_ffprobe(ffprobe: str):
     p=Path(ffprobe)
     if p.is_absolute() or p.parent != Path('.'):
         candidate=p.with_name("ffmpeg.exe" if p.suffix.lower()==".exe" else "ffmpeg")
         if candidate.exists(): return str(candidate)
     return "ffmpeg"
+
 def _parse_ffmpeg_video_info(text: str):
     video_lines=[line for line in (text or "").splitlines() if re.search(r"\bVideo:\s",line,re.I)]; candidates=[]
     for line in video_lines: candidates.extend(re.findall(r"(?<!\d)(\d{2,5})\s*[x×]\s*(\d{2,5})(?!\d)",line))
@@ -27,6 +31,7 @@ def _parse_ffmpeg_video_info(text: str):
     duration=0.0; dm=re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",text or "",re.I)
     if dm:duration=int(dm.group(1))*3600+int(dm.group(2))*60+float(dm.group(3))
     return w,h,fps,duration
+
 def _ffmpeg_fallback_probe(path: Path, ffprobe: str, ffmpeg: str | None = None):
     ffmpeg=ffmpeg or _guess_ffmpeg_from_ffprobe(ffprobe)
     try:r=subprocess.run([ffmpeg,"-hide_banner","-loglevel","info","-i",str(path),"-map","0:v:0","-frames:v","1","-f","null","-"],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=45)
@@ -36,6 +41,7 @@ def _ffmpeg_fallback_probe(path: Path, ffprobe: str, ffmpeg: str | None = None):
     w,h,fps,duration=parsed; has_audio=bool(re.search(r"\bAudio:\s",text,re.I)); streams=[{"codec_type":"video","width":w,"height":h,"avg_frame_rate":f"{int(round(fps*1000))}/1000","r_frame_rate":f"{int(round(fps*1000))}/1000"}]
     if has_audio:streams.append({"codec_type":"audio"})
     return {"streams":streams,"format":{"duration":str(duration)}}
+
 def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
     path=Path(path); ffmpeg=ffmpeg or _guess_ffmpeg_from_ffprobe(ffprobe); probe_error=""
     try:
@@ -50,11 +56,13 @@ def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
     except (OSError,subprocess.SubprocessError) as e:probe_error=f"FFprobe 无法启动：{e}"
     try:return _ffmpeg_fallback_probe(path,ffprobe,ffmpeg)
     except Exception as e:raise RuntimeError(f"{probe_error}\nFFmpeg 后备探测失败：{e}") from e
+
 def available_encoders(ffmpeg="ffmpeg"):
     try:
         p=subprocess.run([ffmpeg,"-hide_banner","-encoders"],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=10); text=(p.stdout or "")+(p.stderr or "")
         return {n for n in set(HARDWARE_CODECS.values())|set(CODECS.values()) if n in text}
     except (OSError,subprocess.SubprocessError):return set()
+
 def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     if width is None and height is None:return None
     ratio=src_w/src_h; width=int(width) if width else None; height=int(height) if height else None
@@ -66,10 +74,14 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
         elif height:width=round(height*ratio)
     if width is None or height is None:raise ValueError("宽度和高度必须至少指定一个")
     return max(2,width-width%2),max(2,height-height%2)
+
 def _smart_invert_filter():
-    # 只反转 Y 亮度，U/V 色度完全不动：白色约 Y=235 -> 20（约90%黑），黑色 -> 白色，彩色保持原色。
-    return "lutyuv=y='255-val'"
+    # 板书只保留少数颜色：黑、红、蓝、绿；白底变约90%黑。
+    # 先在 YUV 中只反转亮度，避免 RGB 全通道反色导致彩色笔迹变补色。
+    return "lutyuv=y='235-(val*235/255)':u='val':v='val'"
+
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
+
 def _cut_filter(cuts,duration,has_audio=False):
     normalized=[]
     for a,b in cuts or []:
@@ -92,6 +104,7 @@ def _cut_filter(cuts,duration,has_audio=False):
     if has_audio:parts.append(''.join(f"[v{i}][a{i}]" for i in range(len(kept)))+f"concat=n={len(kept)}:v=1:a=1[outv][outa]")
     else:parts.append(''.join(f"[v{i}]" for i in range(len(kept)))+f"concat=n={len(kept)}:v=1:a=0[outv]")
     return ';'.join(parts)
+
 def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,height=None,keep_aspect=True,invert="off",src_w=None,src_h=None,encoder=None,ffmpeg="ffmpeg",board_optimized=True,cuts=None,duration=0,has_audio=True):
     p=PRESETS[preset_name]; target_fps=fps or p["fps"]; encoder=encoder or CODECS[codec]; vf=[]
     if width or height:
@@ -118,8 +131,10 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     else:cmd += ["-an"]
     cmd += ["-movflags","+faststart",str(output_path)]
     return cmd
+
 def compress_video(src,dst,width,height,fps,codec="hevc_qsv",bitrate="2M",smart_invert=False,cuts=None,duration=0,has_audio=True):
     cmd=build_command(src,dst,codec,"board-balanced",fps=fps,width=width,height=height,keep_aspect=True,invert=smart_invert,encoder=codec,ffmpeg="ffmpeg",cuts=cuts,duration=duration,has_audio=has_audio); return subprocess.run(cmd,capture_output=True,text=True,encoding="utf-8",errors="replace")
+
 def main():
     parser=argparse.ArgumentParser(description="樊老师板书压缩器"); parser.add_argument("input"); parser.add_argument("--preset",choices=PRESETS,default="board-balanced"); parser.add_argument("--codec",choices=CODECS,default="h265"); parser.add_argument("--fps",type=int,choices=[15,20,24,25,30,50,60]); parser.add_argument("--output"); a=parser.parse_args(); require_binary("ffmpeg"); src=Path(a.input).resolve(); out=Path(a.output).resolve() if a.output else src.with_name(src.stem+"_压缩.mp4"); info=probe(src); v=next(s for s in info["streams"] if s.get("codec_type")=="video"); encs=available_encoders(); enc=CODECS[a.codec]
     if a.codec=="h265" and "hevc_qsv" in encs:enc="hevc_qsv"
