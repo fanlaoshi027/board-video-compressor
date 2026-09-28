@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """樊老师板书视频压缩器 - 跨平台板书压缩核心。"""
 from __future__ import annotations
-import argparse, json, shutil, subprocess
+import argparse, json, re, shutil, subprocess
 from pathlib import Path
 from size_estimator import estimate_output_size, format_bytes
 
@@ -13,20 +13,48 @@ PRESETS={
 CODECS={"h264":"libx264","h265":"libx265","av1":"libsvtav1"}
 HARDWARE_CODECS={"h264_qsv":"h264_qsv","hevc_qsv":"hevc_qsv","av1_qsv":"av1_qsv","h264_videotoolbox":"h264_videotoolbox","hevc_videotoolbox":"hevc_videotoolbox"}
 
+
 def require_binary(name):
     if shutil.which(name) is None:
         raise SystemExit(f"找不到 {name}。请确认 FFmpeg 已内置或已加入 PATH。")
 
-def probe(path:Path,ffprobe="ffprobe"):
-    p=subprocess.run([ffprobe,"-v","error","-print_format","json","-show_format","-show_streams",str(path)],capture_output=True,text=True,check=False)
-    if p.returncode != 0:
-        raise RuntimeError(f"FFprobe 读取失败（返回码 {p.returncode}）：{(p.stderr or '').strip()}")
-    if not p.stdout or not p.stdout.strip():
-        raise RuntimeError("FFprobe 没有返回视频信息。")
-    try:
-        return json.loads(p.stdout)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"FFprobe 返回的数据不是有效 JSON：{e}")
+
+def _ffmpeg_fallback_probe(path: Path, ffprobe: str, ffmpeg: str | None = None):
+    """Windows 下 FFprobe 异常时，用 FFmpeg 的输入探测作为可靠后备。"""
+    if ffmpeg is None:
+        p=Path(ffprobe)
+        ffmpeg=str(p.with_name("ffmpeg.exe" if p.suffix.lower()==".exe" else "ffmpeg")) if p.parent != Path('.') else "ffmpeg"
+    r=subprocess.run([ffmpeg,"-hide_banner","-i",str(path)],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30)
+    text=(r.stderr or "")+(r.stdout or "")
+    m=re.search(r"Video:.*?\s(\d{2,5})x(\d{2,5})(?:[\s,]|$)",text,re.I)
+    if not m:
+        raise RuntimeError(f"FFprobe/FFmpeg 都无法读取视频信息。FFmpeg 输出：{text[-1200:].strip()}")
+    w,h=int(m.group(1)),int(m.group(2))
+    fps=30.0
+    fm=re.search(r"(\d+(?:\.\d+)?)\s*fps",text,re.I)
+    if fm:
+        fps=float(fm.group(1))
+    duration=0.0
+    dm=re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",text,re.I)
+    if dm:
+        duration=int(dm.group(1))*3600+int(dm.group(2))*60+float(dm.group(3))
+    return {"streams":[{"codec_type":"video","width":w,"height":h,"avg_frame_rate":f"{int(round(fps*1000))}/1000"}],"format":{"duration":str(duration)}}
+
+
+def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
+    path=Path(path)
+    p=subprocess.run([ffprobe,"-v","error","-select_streams","v:0","-show_entries","stream=codec_name,width,height,avg_frame_rate,r_frame_rate","-show_entries","format=duration","-of","json",str(path)],capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30)
+    raw=(p.stdout or "").strip()
+    if p.returncode == 0 and raw:
+        try:
+            data=json.loads(raw)
+            streams=data.get("streams") or []
+            if streams and streams[0].get("width") and streams[0].get("height"):
+                return data
+        except json.JSONDecodeError:
+            pass
+    return _ffmpeg_fallback_probe(path,ffprobe,ffmpeg)
+
 
 def available_encoders(ffmpeg="ffmpeg"):
     try:
@@ -35,6 +63,7 @@ def available_encoders(ffmpeg="ffmpeg"):
         return {n for n in set(HARDWARE_CODECS.values())|set(CODECS.values()) if n in text}
     except (OSError,subprocess.SubprocessError):
         return set()
+
 
 def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     if width is None and height is None:return None
@@ -49,15 +78,17 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     if width is None or height is None: raise ValueError("宽度和高度必须至少指定一个")
     return max(2,width-width%2),max(2,height-height%2)
 
+
 def _gray_invert_filter():
-    # 低饱和度的白/灰/黑区域反色；彩色笔迹保持原色。
     return ("lutrgb="
       "r='if(lt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),84,255-r(X,Y)*0.9,r(X,Y))':"
       "g='if(lt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),84,255-g(X,Y)*0.9,g(X,Y))':"
       "b='if(lt(abs(r(X,Y)-g(X,Y))+abs(g(X,Y)-b(X,Y)),84,255-b(X,Y)*0.9,b(X,Y))'")
 
+
 def _board_filter():
     return "unsharp=5:5:0.45:5:5:0"
+
 
 def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,height=None,keep_aspect=True,invert="off",src_w=None,src_h=None,encoder=None,ffmpeg="ffmpeg",board_optimized=True):
     p=PRESETS[preset_name]; target_fps=fps or p["fps"]; encoder=encoder or CODECS[codec]; vf=[]
@@ -67,7 +98,6 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     if board_optimized: vf.append(_board_filter())
     if invert=="on": vf.append(_gray_invert_filter())
     qsv=encoder in {"hevc_qsv","h264_qsv","av1_qsv"}
-    # QSV 对滤镜后的像素格式更敏感；明确转换为 NV12，避免“Could not open encoder before EOF”。
     if qsv: vf.append("format=nv12")
     gop=max(30,int(target_fps*5)); vf_expr=','.join(vf) if vf else "null"
     pix_fmt="nv12" if qsv else "yuv420p"
@@ -82,6 +112,7 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
         cmd += ["-q:v",str(quality)]
     cmd += ["-g",str(gop),"-keyint_min",str(max(1,int(target_fps))),"-pix_fmt",pix_fmt,"-c:a","aac","-b:a","64k","-movflags","+faststart",str(output_path)]
     return cmd
+
 
 def main():
     parser=argparse.ArgumentParser(description="樊老师板书视频压缩器"); parser.add_argument("input"); parser.add_argument("--preset",choices=PRESETS,default="board-balanced"); parser.add_argument("--codec",choices=CODECS,default="h265"); parser.add_argument("--fps",type=int,choices=[15,20,24,25,30,50,60]); parser.add_argument("--output")
