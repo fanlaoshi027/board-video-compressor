@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""樊老师板书压缩器 - Windows / macOS GUI 压缩核心。"""
+"""樊老师板书视频压缩器 - 跨平台板书压缩核心。"""
 from __future__ import annotations
 import argparse, json, shutil, subprocess
 from pathlib import Path
@@ -17,26 +17,11 @@ def require_binary(name):
     if shutil.which(name) is None: raise SystemExit(f"找不到 {name}。请确认 FFmpeg 已内置或已加入 PATH。")
 
 def probe(path:Path,ffprobe="ffprobe"):
-    """读取视频信息。Windows 打包版尤其要把 ffprobe 的失败信息完整返回。"""
-    try:
-        r=subprocess.run(
-            [ffprobe,"-v","error","-print_format","json","-show_format","-show_streams",str(path)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", check=False
-        )
-    except OSError as e:
-        raise RuntimeError(f"无法启动 FFprobe：{ffprobe}\n{e}") from e
-    stdout=(r.stdout or "").strip()
-    stderr=(r.stderr or "").strip()
-    if r.returncode != 0:
-        raise RuntimeError(f"FFprobe 读取视频失败（返回码 {r.returncode}）：{stderr or '没有错误输出'}")
-    if not stdout:
-        raise RuntimeError(f"FFprobe 没有返回视频信息。{stderr}")
-    try:
-        return json.loads(stdout)
-    except (TypeError, ValueError, json.JSONDecodeError) as e:
-        preview=stdout[:500].replace("\n"," ")
-        raise RuntimeError(f"FFprobe 返回的数据不是有效 JSON：{e}\n返回内容：{preview}") from e
+    p=subprocess.run([ffprobe,"-v","error","-print_format","json","-show_format","-show_streams",str(path)],capture_output=True,text=True,check=False)
+    if p.returncode != 0: raise RuntimeError(f"FFprobe 读取失败（返回码 {p.returncode}）：{(p.stderr or '').strip()}")
+    if not p.stdout or not p.stdout.strip(): raise RuntimeError("FFprobe 没有返回视频信息。")
+    try: return json.loads(p.stdout)
+    except json.JSONDecodeError as e: raise RuntimeError(f"FFprobe 返回的数据不是有效 JSON：{e}")
 
 def available_encoders(ffmpeg="ffmpeg"):
     try:
@@ -75,16 +60,19 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     if board_optimized: vf.append(_board_filter())
     if invert=="on": vf.append(_gray_invert_filter())
     gop=max(30,int(target_fps*5)); vf_expr=','.join(vf) if vf else "null"
+    qsv=encoder in {"hevc_qsv","h264_qsv","av1_qsv"}
+    pix_fmt="nv12" if qsv else "yuv420p"
     cmd=[ffmpeg,"-hide_banner","-y","-i",str(input_path),"-map","0:v:0","-map","0:a?","-vf",vf_expr,"-r",str(target_fps),"-fps_mode","cfr","-c:v",encoder]
     if encoder in {"libx264","libx265"}: cmd += ["-preset",p["preset"],"-crf",str(p["crf"])]
     elif encoder=="libsvtav1": cmd += ["-preset","6","-crf",str(max(20,p["crf"]-2))]
-    elif encoder in {"hevc_qsv","h264_qsv","av1_qsv"}:
+    elif qsv:
         icq={"board-high":20,"board-balanced":23,"board-extreme":27}[preset_name]
-        cmd += ["-global_quality",str(icq),"-look_ahead","1"]
+        # Keep QSV options deliberately conservative for broad Intel GPU/driver compatibility.
+        cmd += ["-global_quality",str(icq)]
     elif encoder in {"hevc_videotoolbox","h264_videotoolbox"}:
         quality={"board-high":58,"board-balanced":48,"board-extreme":38}[preset_name]
         cmd += ["-q:v",str(quality)]
-    cmd += ["-g",str(gop),"-keyint_min",str(max(1,int(target_fps))),"-pix_fmt","yuv420p","-c:a","aac","-b:a","64k","-movflags","+faststart",str(output_path)]
+    cmd += ["-g",str(gop),"-keyint_min",str(max(1,int(target_fps))),"-pix_fmt",pix_fmt,"-c:a","aac","-b:a","64k","-movflags","+faststart",str(output_path)]
     return cmd
 
 def main():
