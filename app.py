@@ -48,7 +48,7 @@ class App(tk.Tk):
         self._combo(st,"方案","preset",["高清","均衡","极致压缩"],"均衡"); self._combo(st,"编码","codec",["h265","h264","av1"],"h265"); self._combo(st,"输出帧率","fps",["智能","15","20","24","25","30","50","60"],"智能")
         r=ttk.Frame(st,style="Card.TFrame"); r.pack(fill="x",pady=5); ttk.Label(r,text="分辨率",style="Card.TLabel",width=12).pack(side="left")
         self.width=tk.StringVar(); self.height=tk.StringVar(); self.keep=tk.BooleanVar(value=True)
-        self.width.trace_add("write",lambda *_:self._size_changed("width")); self.height.trace_add("write",lambda *_:self._size_changed("height"))
+        self.width.trace_add("write",lambda *_:self._size_changed("width")); self.height.trace_add("write",lambda *_:self._size_changed("height")); self.keep.trace_add("write",lambda *_:self._lock_changed())
         ttk.Entry(r,textvariable=self.width,width=9).pack(side="left"); ttk.Label(r,text=" × ",style="Card.TLabel").pack(side="left"); ttk.Entry(r,textvariable=self.height,width=9).pack(side="left")
         ttk.Checkbutton(r,text="锁定比例",variable=self.keep).pack(side="left",padx=(12,0)); ttk.Button(r,text="原始尺寸",command=self.reset).pack(side="left",padx=(12,0))
         r=ttk.Frame(st,style="Card.TFrame"); r.pack(fill="x",pady=5); ttk.Label(r,text="画面优化",style="Card.TLabel",width=12).pack(side="left")
@@ -72,13 +72,17 @@ class App(tk.Tk):
         if p:self.files=list(p);self.file_label.config(text=f"已选择 {len(p)} 个视频：{Path(p[0]).name}"+(" 等" if len(p)>1 else ""));self._load(Path(p[0]))
 
     def _load(self,p):
+        self.src_info=None; self.src_ratio=None
         try:
             info=probe(p,bundled_binary("ffprobe")); self.src_info=info; v=next(s for s in info["streams"] if s.get("codec_type")=="video"); w,h=int(v["width"]),int(v["height"]); self.src_ratio=w/h
             self._set_size(w,h); d=float(info.get("format",{}).get("duration") or 0); self.write(f"检测：{w}×{h} · {self._fps(v):.1f} FPS · {d/60:.1f} 分钟 · {format_bytes(p.stat().st_size)}"); self._refresh_estimate()
-        except Exception as e:self.write(f"视频信息读取失败：{e}")
+        except Exception as e:
+            self.estimate.config(text="暂时无法估算：视频信息读取失败")
+            self.analysis.config(text="请检查 FFprobe/视频文件，然后重新选择视频")
+            self.write(f"视频信息读取失败：{e}")
 
     def _set_size(self,w,h):
-        self._updating_size=True; self.width.set(str(w)); self.height.set(str(h)); self._updating_size=False
+        self._updating_size=True; self.width.set(str(w)); self.height.set(str(h)); self._updating_size=False; self._refresh_estimate()
 
     def _size_changed(self,changed):
         if self._updating_size or not self.keep.get() or not self.src_ratio:return
@@ -92,6 +96,15 @@ class App(tk.Tk):
             self._refresh_estimate()
         except ValueError: pass
 
+    def _lock_changed(self):
+        if self._updating_size or not self.keep.get() or not self.src_ratio:return
+        try:
+            value=int(self.width.get())
+            if value>0:
+                self._updating_size=True; self.height.set(str(max(2,round(value/self.src_ratio)))); self._updating_size=False
+        except ValueError: pass
+        self._refresh_estimate()
+
     def _fps(self,v):
         try:a,b=(v.get("avg_frame_rate") or v.get("r_frame_rate") or "30/1").split("/");return float(a)/float(b) if float(b) else 30
         except:return 30
@@ -102,11 +115,13 @@ class App(tk.Tk):
         if not self.files or not self.src_info:return
         try:
             v=next(s for s in self.src_info["streams"] if s.get("codec_type")=="video"); sw,sh=int(v["width"]),int(v["height"]); sf=self._fps(v); tf=self._selected_fps(sf); w=int(self.width.get()); h=int(self.height.get()); est=estimate_output_size(Path(self.files[0]).stat().st_size,sf,tf,sw,sh,w,h,self.codec.get(),PRESET_LABELS[self.preset.get()]); self.estimate.config(text=f"预计输出：{format_bytes(est[0])} ～ {format_bytes(est[1])}（实际大小以压缩结果为准）"); self.analysis.config(text=f"原始：{sw}×{sh} · {sf:.1f} FPS → 目标：{w}×{h} · {tf} FPS · {self.codec.get().upper()}")
-        except (ValueError,KeyError,ZeroDivisionError):pass
+        except (ValueError,KeyError,ZeroDivisionError) as e:
+            self.estimate.config(text=f"暂时无法估算：{e}")
+            self.analysis.config(text="请检查分辨率、帧率或编码设置")
 
     def reset(self):
         if self.files and self.src_info:
-            v=next(s for s in self.src_info["streams"] if s.get("codec_type")=="video"); self._set_size(int(v["width"]),int(v["height"])); self._refresh_estimate()
+            v=next(s for s in self.src_info["streams"] if s.get("codec_type")=="video"); self._set_size(int(v["width"]),int(v["height"])); self.keep.set(True); self._refresh_estimate()
 
     def output_dir(self):
         p=filedialog.askdirectory(title="选择输出目录")
