@@ -90,7 +90,6 @@ def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
             try:
                 data=json.loads(raw)
                 streams=data.get("streams") or []
-                # 某些 FFprobe 版本/参数组合可能不给 codec_type，补成视频流以兼容 GUI。
                 if streams and streams[0].get("width") and streams[0].get("height"):
                     streams[0].setdefault("codec_type","video")
                     data["streams"]=streams
@@ -130,9 +129,14 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     return max(2,width-width%2),max(2,height-height%2)
 
 
-def _gray_invert_filter():
-    # 智能反色暂保留接口；正式滤镜待专门验证后启用，避免彩色笔迹被错误反色。
-    return "null"
+def _smart_invert_filter():
+    """板书智能反色：近灰/黑白像素反色，彩色像素保持原色。
+    白色 255 -> 约 26（90%黑），黑色 0 -> 255。
+    """
+    expr_r="if(gt(max(max(r(X,Y),g(X,Y)),b(X,Y))-min(min(r(X,Y),g(X,Y)),b(X,Y)),18),r(X,Y),255-0.9*r(X,Y))"
+    expr_g="if(gt(max(max(r(X,Y),g(X,Y)),b(X,Y))-min(min(r(X,Y),g(X,Y)),b(X,Y)),18),g(X,Y),255-0.9*g(X,Y))"
+    expr_b="if(gt(max(max(r(X,Y),g(X,Y)),b(X,Y))-min(min(r(X,Y),g(X,Y)),b(X,Y)),18),b(X,Y),255-0.9*b(X,Y))"
+    return f"format=rgb24,geq=r='{expr_r}':g='{expr_g}':b='{expr_b}'"
 
 
 def _board_filter():
@@ -144,6 +148,8 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     if width or height:
         if not src_w or not src_h: raise ValueError("设置分辨率时需要原视频尺寸")
         size=calculate_output_size(width,height,src_w,src_h,keep_aspect); vf.append(f"scale={size[0]}:{size[1]}:flags=lanczos")
+    if invert in (True,"on","1","true","yes"):
+        vf.append(_smart_invert_filter())
     if board_optimized: vf.append(_board_filter())
     qsv=encoder in {"hevc_qsv","h264_qsv","av1_qsv"}
     if qsv: vf.append("format=nv12")
