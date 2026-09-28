@@ -3,7 +3,66 @@
 from __future__ import annotations
 
 import app as _app
-from preview_controls import PreviewWindow
+from preview_controls import PreviewWindow as _BasePreviewWindow
+
+
+class PreviewWindow(_BasePreviewWindow):
+    """Windows 预览增强：键盘控制。"""
+
+    def __init__(self, app, path, duration, info):
+        super().__init__(app, path, duration, info)
+        self.bind("<space>", self._key_play_pause)
+        self.bind("<Left>", self._key_left)
+        self.bind("<Right>", self._key_right)
+        self.bind("<Shift-Left>", self._key_shift_left)
+        self.bind("<Shift-Right>", self._key_shift_right)
+        self.bind("<Home>", self._key_home)
+        self.bind("<End>", self._key_end)
+        self.focus_set()
+
+    def _key_play_pause(self, event=None):
+        self.toggle_play()
+        return "break"
+
+    def _key_left(self, event=None):
+        self._keyboard_seek(-5.0)
+        return "break"
+
+    def _key_right(self, event=None):
+        self._keyboard_seek(5.0)
+        return "break"
+
+    def _key_shift_left(self, event=None):
+        self._keyboard_seek(-1.0)
+        return "break"
+
+    def _key_shift_right(self, event=None):
+        self._keyboard_seek(1.0)
+        return "break"
+
+    def _key_home(self, event=None):
+        self._keyboard_seek_to(0.0)
+        return "break"
+
+    def _key_end(self, event=None):
+        self._keyboard_seek_to(self.duration)
+        return "break"
+
+    def _keyboard_seek(self, delta):
+        target = min(self.duration, max(0.0, self.pos + delta))
+        was_playing = self.playing
+        self.playing = False
+        self.play_btn.config(text="▶ 播放")
+        self._stop_process()
+        self.seek_to(target, autoplay=was_playing)
+
+    def _keyboard_seek_to(self, target):
+        was_playing = self.playing
+        self.playing = False
+        self.play_btn.config(text="▶ 播放")
+        self._stop_process()
+        self.seek_to(target, autoplay=was_playing)
+
 
 # App.open_preview() 使用 app 模块的 PreviewWindow 全局变量。
 # 在 Windows 入口替换为增强版预览，不修改压缩主流程。
