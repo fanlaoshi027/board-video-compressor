@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """樊老师板书压缩器 - Windows / macOS GUI。"""
 from __future__ import annotations
-import queue, subprocess, sys, threading
+import json, queue, subprocess, sys, threading
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -16,8 +16,14 @@ def app_dir():
 
 def bundled_binary(name):
     suffix=".exe" if sys.platform.startswith("win") else ""
-    p=app_dir()/"bin"/f"{name}{suffix}"
-    return str(p) if p.exists() else name
+    candidates=[app_dir()/"bin"/f"{name}{suffix}",app_dir()/f"{name}{suffix}"]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return name
+
+def run_text(cmd,timeout=15):
+    return subprocess.run(cmd,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout)
 
 class App(tk.Tk):
     def __init__(self):
@@ -62,8 +68,13 @@ class App(tk.Tk):
         row=ttk.Frame(parent,style="Card.TFrame"); row.pack(fill="x",pady=5); ttk.Label(row,text=label,style="Card.TLabel",width=12).pack(side="left"); var=tk.StringVar(value=default); setattr(self,attr,var); ttk.Combobox(row,textvariable=var,values=values,state="readonly",width=18).pack(side="left"); var.trace_add("write",lambda *_:self._refresh_estimate())
 
     def _hardware(self):
-        enc=detect(bundled_binary("ffmpeg")).get("recommended","libx265"); label={"hevc_qsv":"Windows · Intel QSV（H.265）","av1_qsv":"Windows · Intel QSV（AV1）","hevc_videotoolbox":"macOS · VideoToolbox（HEVC）","libx265":"CPU x265"}.get(enc,enc); self.hardware.config(text=f"编码能力：{label}")
-        if enc in ("hevc_qsv","hevc_videotoolbox"):self.codec.set("h265")
+        ffmpeg=bundled_binary("ffmpeg")
+        try:
+            enc=detect(ffmpeg).get("recommended","libx265")
+            label={"hevc_qsv":"Windows · Intel QSV（H.265）","av1_qsv":"Windows · Intel QSV（AV1）","hevc_videotoolbox":"macOS · VideoToolbox（HEVC）","libx265":"CPU x265"}.get(enc,enc)
+            self.hardware.config(text=f"编码能力：{label} · FFmpeg：{ffmpeg}")
+            if enc in ("hevc_qsv","hevc_videotoolbox"):self.codec.set("h265")
+        except Exception as e:self.hardware.config(text=f"编码检测失败：{e}")
 
     def write(self,t):self.log.insert("end",t+"\n");self.log.see("end")
 
@@ -77,9 +88,7 @@ class App(tk.Tk):
             info=probe(p,bundled_binary("ffprobe")); self.src_info=info; v=next(s for s in info["streams"] if s.get("codec_type")=="video"); w,h=int(v["width"]),int(v["height"]); self.src_ratio=w/h
             self._set_size(w,h); d=float(info.get("format",{}).get("duration") or 0); self.write(f"检测：{w}×{h} · {self._fps(v):.1f} FPS · {d/60:.1f} 分钟 · {format_bytes(p.stat().st_size)}"); self._refresh_estimate()
         except Exception as e:
-            self.estimate.config(text="暂时无法估算：视频信息读取失败")
-            self.analysis.config(text="请检查 FFprobe/视频文件，然后重新选择视频")
-            self.write(f"视频信息读取失败：{e}")
+            self.estimate.config(text="暂时无法估算：视频信息读取失败"); self.analysis.config(text="请检查 FFprobe/视频文件，然后重新选择视频"); self.write(f"视频信息读取失败：{e}")
 
     def _set_size(self,w,h):
         self._updating_size=True; self.width.set(str(w)); self.height.set(str(h)); self._updating_size=False; self._refresh_estimate()
@@ -92,16 +101,14 @@ class App(tk.Tk):
             self._updating_size=True
             if changed=="width": self.height.set(str(max(2,round(value/self.src_ratio))))
             else: self.width.set(str(max(2,round(value*self.src_ratio))))
-            self._updating_size=False
-            self._refresh_estimate()
+            self._updating_size=False; self._refresh_estimate()
         except ValueError: pass
 
     def _lock_changed(self):
         if self._updating_size or not self.keep.get() or not self.src_ratio:return
         try:
             value=int(self.width.get())
-            if value>0:
-                self._updating_size=True; self.height.set(str(max(2,round(value/self.src_ratio)))); self._updating_size=False
+            if value>0:self._updating_size=True; self.height.set(str(max(2,round(value/self.src_ratio)))); self._updating_size=False
         except ValueError: pass
         self._refresh_estimate()
 
@@ -116,8 +123,7 @@ class App(tk.Tk):
         try:
             v=next(s for s in self.src_info["streams"] if s.get("codec_type")=="video"); sw,sh=int(v["width"]),int(v["height"]); sf=self._fps(v); tf=self._selected_fps(sf); w=int(self.width.get()); h=int(self.height.get()); est=estimate_output_size(Path(self.files[0]).stat().st_size,sf,tf,sw,sh,w,h,self.codec.get(),PRESET_LABELS[self.preset.get()]); self.estimate.config(text=f"预计输出：{format_bytes(est[0])} ～ {format_bytes(est[1])}（实际大小以压缩结果为准）"); self.analysis.config(text=f"原始：{sw}×{sh} · {sf:.1f} FPS → 目标：{w}×{h} · {tf} FPS · {self.codec.get().upper()}")
         except (ValueError,KeyError,ZeroDivisionError) as e:
-            self.estimate.config(text=f"暂时无法估算：{e}")
-            self.analysis.config(text="请检查分辨率、帧率或编码设置")
+            self.estimate.config(text=f"暂时无法估算：{e}"); self.analysis.config(text="请检查分辨率、帧率或编码设置")
 
     def reset(self):
         if self.files and self.src_info:
@@ -132,32 +138,67 @@ class App(tk.Tk):
         if not self.files:messagebox.showinfo("提示","请先选择视频。");return
         self.running=True;self.start_btn.config(state="disabled");self.progress.start(10);threading.Thread(target=self._worker,daemon=True).start()
 
-    def _worker(self):
-        ffmpeg=bundled_binary("ffmpeg");ffprobe=bundled_binary("ffprobe");preset=PRESET_LABELS[self.preset.get()]
+    def _validate_ffmpeg(self,ffmpeg):
+        r=run_text([ffmpeg,"-hide_banner","-version"])
+        if r.returncode!=0: raise RuntimeError(f"内置 FFmpeg 无法启动：{r.stderr.strip() or r.stdout.strip()}")
+        return r.stdout.splitlines()[0] if r.stdout else "FFmpeg 可用"
+
+    def _validate_output(self,out,ffprobe):
+        if not out.exists(): return False,"输出文件没有生成"
+        size=out.stat().st_size
+        if size<=0:return False,"输出文件为 0 KB"
         try:
+            info=probe(out,ffprobe); v=next(s for s in info.get("streams",[]) if s.get("codec_type")=="video")
+            return True,f"有效 MP4：{v.get('width')}×{v.get('height')}"
+        except Exception as e:return False,f"输出文件不是有效视频：{e}"
+
+    def _worker(self):
+        ffmpeg=bundled_binary("ffmpeg");ffprobe=bundled_binary("ffprobe");preset=PRESET_LABELS[self.preset.get()]; success_count=0; failure_count=0
+        try:
+            self.events.put(f"FFmpeg：{ffmpeg}"); self.events.put(self._validate_ffmpeg(ffmpeg))
             info=probe(Path(self.files[0]),ffprobe);v=next(s for s in info["streams"] if s.get("codec_type")=="video");sf=self._fps(v);fps=self._selected_fps(sf);encs=available_encoders(ffmpeg);codec=self.codec.get();enc=None
+            self.events.put(f"可用编码器：{', '.join(sorted(encs)) or '未检测到'}")
             if codec=="h265":enc="hevc_qsv" if sys.platform.startswith("win") and "hevc_qsv" in encs else ("hevc_videotoolbox" if sys.platform=="darwin" and "hevc_videotoolbox" in encs else None)
             elif codec=="h264":enc="h264_qsv" if sys.platform.startswith("win") and "h264_qsv" in encs else ("h264_videotoolbox" if sys.platform=="darwin" and "h264_videotoolbox" in encs else None)
             elif codec=="av1" and sys.platform.startswith("win") and "av1_qsv" in encs:enc="av1_qsv"
+            self.events.put(f"选择编码器：{enc or PRESETS[preset].get('preset','CPU')}")
         except Exception as e:self.events.put(f"初始化失败：{e}");self.events.put("__DONE__");return
         for src in self.files:
             sp=Path(src);od=sp.parent if self.out_dir.get()=="与原视频放在同一目录" else Path(self.out_dir.get());od.mkdir(parents=True,exist_ok=True);out=od/f"{sp.stem}_压缩_{codec}_{fps}fps.mp4"
             try:
-                inf=probe(sp,ffprobe);vv=next(s for s in inf["streams"] if s.get("codec_type")=="video");cmd=build_command(sp,out,codec,preset,fps=fps,width=int(self.width.get()),height=int(self.height.get()),keep_aspect=self.keep.get(),invert="on" if self.invert.get() else "off",src_w=int(vv["width"]),src_h=int(vv["height"]),encoder=enc,ffmpeg=ffmpeg,board_optimized=self.board.get());self.events.put(f"开始：{sp.name} → {out.name}（{cmd[cmd.index('-c:v')+1]}）");p=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding="utf-8",errors="replace")
+                if out.exists():out.unlink()
+                inf=probe(sp,ffprobe);vv=next(s for s in inf["streams"] if s.get("codec_type")=="video")
+                cmd=build_command(sp,out,codec,preset,fps=fps,width=int(self.width.get()),height=int(self.height.get()),keep_aspect=self.keep.get(),invert="on" if self.invert.get() else "off",src_w=int(vv["width"]),src_h=int(vv["height"]),encoder=enc,ffmpeg=ffmpeg,board_optimized=self.board.get())
+                self.events.put(f"开始：{sp.name} → {out.name}"); self.events.put("命令："+subprocess.list2cmdline(cmd))
+                p=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding="utf-8",errors="replace")
                 for line in p.stdout or []:
                     if line.strip():self.events.put(line.strip())
-                code=p.wait()
-                if code:self.events.put(f"失败：{sp.name}（FFmpeg 返回 {code}）")
+                code=p.wait(); valid,detail=self._validate_output(out,ffprobe)
+                if code!=0 or not valid:
+                    failure_count+=1
+                    self.events.put(f"失败：{sp.name}（FFmpeg 返回 {code}）")
+                    self.events.put(detail)
+                    if out.exists() and out.stat().st_size==0:out.unlink()
                 else:
-                    before=sp.stat().st_size;after=out.stat().st_size if out.exists() else 0;self.events.put(f"完成：{out.name}");self.events.put(f"原视频：{format_bytes(before)} → 压缩后：{format_bytes(after)} → 节省：{format_bytes(max(0,before-after))}（{(before-after)/before*100:.1f}%）")
-            except Exception as e:self.events.put(f"错误：{sp.name}：{e}")
+                    success_count+=1;before=sp.stat().st_size;after=out.stat().st_size;self.events.put(f"完成：{out.name}");self.events.put(f"原视频：{format_bytes(before)} → 压缩后：{format_bytes(after)} → 节省：{format_bytes(max(0,before-after))}（{(before-after)/before*100:.1f}%）")
+            except Exception as e:
+                failure_count+=1;self.events.put(f"错误：{sp.name}：{e}")
+                if out.exists() and out.stat().st_size==0:
+                    try:out.unlink()
+                    except OSError:pass
+        self.events.put(f"__SUMMARY__{success_count}__{failure_count}")
         self.events.put("__DONE__")
 
     def _poll(self):
         try:
             while True:
                 m=self.events.get_nowait()
-                if m=="__DONE__":self.running=False;self.start_btn.config(state="normal");self.progress.stop();messagebox.showinfo("完成","视频处理完成。")
+                if m.startswith("__SUMMARY__"):
+                    _,ok,bad=m.split("__");self.summary=(int(ok),int(bad))
+                elif m=="__DONE__":
+                    self.running=False;self.start_btn.config(state="normal");self.progress.stop();ok,bad=getattr(self,"summary",(0,1));
+                    if bad==0 and ok>0:messagebox.showinfo("完成",f"成功处理 {ok} 个视频。")
+                    else:messagebox.showerror("压缩失败",f"成功：{ok} 个，失败：{bad} 个。请查看处理结果中的 FFmpeg 错误信息。")
                 else:self.write(m)
         except queue.Empty:pass
         self.after(100,self._poll)
