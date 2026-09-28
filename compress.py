@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""樊老师板书视频压缩器 - Windows 板书视频压缩核心。"""
+"""樊老师板书视频压缩核心。"""
 from __future__ import annotations
 import argparse, json, re, shutil, subprocess
 from pathlib import Path
@@ -29,67 +29,48 @@ def _guess_ffmpeg_from_ffprobe(ffprobe: str):
 
 
 def _parse_ffmpeg_video_info(text: str):
-    """从 FFmpeg 的诊断输出中稳健提取第一个视频流的尺寸/FPS/时长。"""
     text=text or ""
-    # 先只看包含 Video: 的行，避免把音频/其他数字误识别成分辨率。
     video_lines=[line for line in text.splitlines() if re.search(r"\bVideo:\s",line,re.I)]
     candidates=[]
     for line in video_lines:
         candidates.extend(re.findall(r"(?<!\d)(\d{2,5})\s*[x×]\s*(\d{2,5})(?!\d)",line))
     if not candidates:
-        # 某些 FFmpeg 构建会换行，把尺寸放在相邻行；再从整个输出中兜底。
         candidates=re.findall(r"(?<!\d)(\d{2,5})\s*[x×]\s*(\d{2,5})(?!\d)",text)
-    # 过滤明显不是视频尺寸的极小/极大数字。
     candidates=[(int(w),int(h)) for w,h in candidates if 64<=int(w)<=10000 and 64<=int(h)<=10000]
     if not candidates:
         return None
-
-    # 优先选择最接近常见视频宽高比的候选；通常第一个就是视频尺寸。
     def score(item):
         w,h=item; ratio=w/h
-        aspect=min(abs(ratio-16/9),abs(ratio-4/3),abs(ratio-1.0),abs(ratio-9/16))
-        return aspect
+        return min(abs(ratio-16/9),abs(ratio-4/3),abs(ratio-1.0),abs(ratio-9/16))
     w,h=min(candidates,key=score)
-
     fps=30.0
     fps_matches=re.findall(r"(?:,|\s)(\d+(?:\.\d+)?)\s*fps(?:,|\s|$)",text,re.I)
     if fps_matches:
         try: fps=float(fps_matches[0])
         except ValueError: pass
-
     duration=0.0
     dm=re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",text,re.I)
     if dm:
         duration=int(dm.group(1))*3600+int(dm.group(2))*60+float(dm.group(3))
-
     return w,h,fps,duration
 
 
 def _ffmpeg_fallback_probe(path: Path, ffprobe: str, ffmpeg: str | None = None):
-    """FFprobe 无法使用时，用同目录 FFmpeg 的诊断输出探测视频。"""
     ffmpeg=ffmpeg or _guess_ffmpeg_from_ffprobe(ffprobe)
     try:
         r=subprocess.run(
-            [ffmpeg,"-hide_banner","-loglevel","info","-i",str(path),"-f","null","-"],
+            [ffmpeg,"-hide_banner","-loglevel","info","-i",str(path),"-map","0:v:0","-frames:v","1","-f","null","-"],
             capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=45
         )
     except (OSError,subprocess.SubprocessError) as e:
         raise RuntimeError(f"FFmpeg 无法启动：{e}") from e
-
     text=(r.stderr or "")+(r.stdout or "")
     parsed=_parse_ffmpeg_video_info(text)
     if not parsed:
-        tail=text[-4000:].strip()
+        tail=text[-5000:].strip()
         raise RuntimeError(f"FFmpeg 无法识别视频。返回码={r.returncode}\nFFmpeg 输出：\n{tail}")
     w,h,fps,duration=parsed
-    return {
-        "streams":[{
-            "codec_type":"video","width":w,"height":h,
-            "avg_frame_rate":f"{int(round(fps*1000))}/1000",
-            "r_frame_rate":f"{int(round(fps*1000))}/1000",
-        }],
-        "format":{"duration":str(duration)},
-    }
+    return {"streams":[{"codec_type":"video","width":w,"height":h,"avg_frame_rate":f"{int(round(fps*1000))}/1000","r_frame_rate":f"{int(round(fps*1000))}/1000"}],"format":{"duration":str(duration)}}
 
 
 def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
@@ -100,7 +81,7 @@ def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
     try:
         p=subprocess.run(
             [ffprobe,"-v","error","-select_streams","v:0",
-             "-show_entries","stream=codec_name,width,height,avg_frame_rate,r_frame_rate",
+             "-show_entries","stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate",
              "-show_entries","format=duration","-of","json",str(path)],
             capture_output=True,text=True,encoding="utf-8",errors="replace",check=False,timeout=30
         )
@@ -109,7 +90,10 @@ def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
             try:
                 data=json.loads(raw)
                 streams=data.get("streams") or []
+                # 某些 FFprobe 版本/参数组合可能不给 codec_type，补成视频流以兼容 GUI。
                 if streams and streams[0].get("width") and streams[0].get("height"):
+                    streams[0].setdefault("codec_type","video")
+                    data["streams"]=streams
                     return data
                 probe_error=f"FFprobe 返回空视频流；stderr={(p.stderr or '')[-1000:]}"
             except json.JSONDecodeError as e:
@@ -118,7 +102,6 @@ def probe(path:Path,ffprobe="ffprobe",ffmpeg=None):
             probe_error=f"FFprobe 返回码={p.returncode}；stderr={(p.stderr or '')[-1000:]}"
     except (OSError,subprocess.SubprocessError) as e:
         probe_error=f"FFprobe 无法启动：{e}"
-
     try:
         return _ffmpeg_fallback_probe(path,ffprobe,ffmpeg)
     except Exception as e:
@@ -148,8 +131,8 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
 
 
 def _gray_invert_filter():
-    # 使用 saturation 判断黑白灰，彩色像素保持原色。
-    return "hue=s=0,negate=enable='between(val,0,0)'"
+    # 智能反色暂保留接口；正式滤镜待专门验证后启用，避免彩色笔迹被错误反色。
+    return "null"
 
 
 def _board_filter():
@@ -162,7 +145,6 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
         if not src_w or not src_h: raise ValueError("设置分辨率时需要原视频尺寸")
         size=calculate_output_size(width,height,src_w,src_h,keep_aspect); vf.append(f"scale={size[0]}:{size[1]}:flags=lanczos")
     if board_optimized: vf.append(_board_filter())
-    # 智能反色暂不进入正式压缩链，避免错误滤镜破坏彩色笔迹；GUI 开关保留待专用滤镜完成后启用。
     qsv=encoder in {"hevc_qsv","h264_qsv","av1_qsv"}
     if qsv: vf.append("format=nv12")
     gop=max(30,int(target_fps*5)); vf_expr=','.join(vf) if vf else "null"
