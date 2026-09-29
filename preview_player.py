@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 import threading
-import time
 from pathlib import Path
 
 import tkinter as tk
@@ -15,7 +14,7 @@ except ImportError:
 
 
 class ReliablePreviewWindow(tk.Toplevel):
-    """稳定的视频预览：单一播放管道、最新帧缓冲、拖动时彻底丢弃旧帧。"""
+    """稳定的视频预览：单一播放管道、最新帧缓冲、拖动时不启动 FFmpeg。"""
 
     FPS = 12
 
@@ -30,6 +29,7 @@ class ReliablePreviewWindow(tk.Toplevel):
         self.was_playing = False
         self.photo = None
         self.preview_proc = None
+        self.seek_proc = None
         self.generation = 0
         self.seek_job = None
         self.ui_job = None
@@ -106,6 +106,17 @@ class ReliablePreviewWindow(tk.Toplevel):
                     p.kill()
                 except Exception:
                     pass
+        p = self.seek_proc
+        self.seek_proc = None
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+                p.wait(timeout=0.5)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
 
     def _read_exact(self, stream, size):
         data = bytearray()
@@ -121,8 +132,7 @@ class ReliablePreviewWindow(tk.Toplevel):
         self.generation += 1
         generation = self.generation
         cmd = [
-            self.app._bundled_binary("ffmpeg") if hasattr(self.app, "_bundled_binary") else self._binary("ffmpeg"),
-            "-hide_banner", "-loglevel", "error", "-re",
+            self._binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-re",
             "-ss", f"{start:.3f}", "-i", str(self.path), "-an",
             "-vf", f"scale={self.frame_w}:{self.frame_h},fps={self.FPS}",
             "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
@@ -224,7 +234,7 @@ class ReliablePreviewWindow(tk.Toplevel):
         if self.playing:
             self.playing = False
             self.play_btn.config(text="▶ 播放")
-            self._stop_process()
+        self._stop_process()
         self.status.config(text="正在定位…")
 
     def on_seek(self, value):
@@ -244,6 +254,7 @@ class ReliablePreviewWindow(tk.Toplevel):
                 self.after_cancel(self.seek_job)
             except Exception:
                 pass
+            self.seek_job = None
         self.seek_job = self.after(60, lambda: self._seek_now(pos, autoplay))
 
     def _seek_now(self, pos, autoplay=False):
@@ -264,6 +275,7 @@ class ReliablePreviewWindow(tk.Toplevel):
         self._show_single_frame(self.pos)
 
     def _show_single_frame(self, pos):
+        self._stop_process()
         self.generation += 1
         generation = self.generation
         cmd = [
@@ -276,18 +288,30 @@ class ReliablePreviewWindow(tk.Toplevel):
         except Exception as e:
             self.status.config(text=f"定位失败：{e}")
             return
+        self.seek_proc = p
 
-        def worker():
+        def worker(proc=p, g=generation):
             try:
-                raw = self._read_exact(p.stdout, self.frame_bytes)
-                try:
-                    p.terminate()
-                except Exception:
-                    pass
-                if raw and generation == self.generation and Image:
-                    self.after(0, lambda: self._display_single(raw, pos, generation))
+                raw = self._read_exact(proc.stdout, self.frame_bytes)
+                if raw and g == self.generation and not self.closed and Image:
+                    self.after(0, lambda: self._display_single(raw, pos, g))
             except Exception:
                 pass
+            finally:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=0.3)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                if self.seek_proc is proc:
+                    self.seek_proc = None
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -340,6 +364,12 @@ class ReliablePreviewWindow(tk.Toplevel):
             except Exception:
                 pass
             self.ui_job = None
+        if self.seek_job:
+            try:
+                self.after_cancel(self.seek_job)
+            except Exception:
+                pass
+            self.seek_job = None
         self._stop_process()
         self.destroy()
 
