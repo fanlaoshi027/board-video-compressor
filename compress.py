@@ -81,11 +81,14 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     if width is None or height is None:raise ValueError("宽度和高度必须至少指定一个")
     return max(2,width-width%2),max(2,height-height%2)
 
-def _smart_invert_filter():return "lutyuv=y='235-(val*235/255)':u='val':v='val'"
+def _smart_invert_filter():
+    """板书反色：接近白色的像素压到约10%亮度；有色笔迹尽量保持原色。"""
+    # 用 RGB 亮度/色度判定“接近白色”，只改变高亮、低饱和区域；彩色区域保持原样。
+    return "format=rgb24,lutrgb=r='if(gt(max(max(r,g),b)-min(min(r,g),b),35),r,if(gt((r+g+b)/3,210),25, r))':g='if(gt(max(max(r,g),b)-min(min(r,g),b),35),g,if(gt((r+g+b)/3,210),25,g))':b='if(gt(max(max(r,g),b)-min(min(r,g),b),35),b,if(gt((r+g+b)/3,210),25,b))'"
+
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
 
 def normalize_cuts(cuts,duration):
-    """限制、排序并合并用户选择的删除区间，供界面确认和 FFmpeg 共用。"""
     duration=max(0.0,float(duration)); items=[]
     for a,b in cuts or []:
         try:a=max(0.0,min(duration,float(a))); b=max(0.0,min(duration,float(b)))
@@ -125,14 +128,16 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     if board_optimized:vf.append(_board_filter())
     qsv=encoder in {"hevc_qsv","h264_qsv","av1_qsv"}
     if qsv:vf.append("format=nv12")
-    gop=max(30,int(target_fps*5)); vf_expr=','.join(vf) if vf else "null"; pix_fmt="nv12" if qsv else "yuv420p"; cuts=cuts or []
+    gop=max(30,int(target_fps*5)); post=','.join(vf) if vf else "null"; pix_fmt="nv12" if qsv else "yuv420p"; cuts=cuts or []
     if cuts:
-        graph=_cut_filter(cuts,float(duration),has_audio=has_audio); post=','.join(vf) if vf else "null"; graph+=f";[outv]{post}[vout]"; cmd=[ffmpeg,"-hide_banner","-loglevel","error","-y","-i",str(input_path),"-filter_complex",graph,"-map","[vout]"]
+        graph=_cut_filter(cuts,float(duration),has_audio=has_audio)+f";[outv]{post}[vout]"
+        cmd=[ffmpeg,"-hide_banner","-loglevel","error","-y","-i",str(input_path),"-filter_complex",graph,"-map","[vout]"]
         if has_audio:cmd += ["-map","[outa]"]
+        cmd += ["-r",str(target_fps),"-fps_mode","cfr"]
     else:
         cmd=[ffmpeg,"-hide_banner","-loglevel","error","-y","-i",str(input_path),"-map","0:v:0"]
         if has_audio:cmd += ["-map","0:a?"]
-        cmd += ["-vf",vf_expr,"-r",str(target_fps),"-fps_mode","cfr"]
+        cmd += ["-vf",post,"-r",str(target_fps),"-fps_mode","cfr"]
     cmd += ["-c:v",encoder]
     if encoder in {"libx264","libx265"}:cmd += ["-preset",p["preset"],"-crf",str(p["crf"])]
     elif encoder=="libsvtav1":cmd += ["-preset","6","-crf",str(max(20,p["crf"]-2))]
