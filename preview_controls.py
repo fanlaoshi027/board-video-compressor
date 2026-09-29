@@ -2,7 +2,7 @@ from preview_player import ReliablePreviewWindow
 
 
 class PreviewWindow(ReliablePreviewWindow):
-    """Windows 预览增强层：可靠的键盘定位控制。"""
+    """Windows 预览增强层：键盘只用于快速寻找时间点。"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -45,14 +45,11 @@ class PreviewWindow(ReliablePreviewWindow):
         return "break"
 
     def _nudge(self, delta):
-        target = min(self.duration, max(0.0, self.pos + delta))
-        self._seek_keyboard(target)
+        self._seek_keyboard(min(self.duration, max(0.0, self.pos + delta)))
 
     def _seek_keyboard(self, target):
-        # 键盘定位与鼠标拖动保持相同的状态语义：
-        # 原来播放则定位后继续，原来暂停则保持暂停。
         was_playing = bool(self.playing)
         self.playing = False
         self.play_btn.config(text="▶ 播放")
-        self._stop_process()
+        self._stop_proc()
         self.seek_to(target, autoplay=was_playing)
