@@ -3,6 +3,7 @@ from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 from compress import build_command, probe, available_encoders, PRESETS
 from size_estimator import estimate_output_size, format_bytes
+from preview_window import PreviewWindow
 
 VIDEO_EXTS=("*.mp4","*.mov","*.mkv","*.avi","*.webm","*.m4v")
 PRESET_LABELS={"高清":"board-high","均衡":"board-balanced","极致压缩":"board-extreme"}
@@ -41,12 +42,12 @@ class App(tk.Tk):
         r=ttk.Frame(p,style="Card.TFrame"); r.pack(fill="x",pady=4); ttk.Label(r,text=label,style="Card.TLabel",width=9).pack(side="left"); v=tk.StringVar(value=default); setattr(self,attr,v); ttk.Combobox(r,textvariable=v,values=values,state="readonly",width=16).pack(side="left")
     def write(self,t): self.log.insert("end",t+"\n"); self.log.see("end")
     def _hardware(self):
-        try:self.hardware.config(text="编码器："+(", ".join(sorted(available_encoders(bundled_binary("ffmpeg")))) or "CPU"))
-        except Exception as e:self.hardware.config(text=f"编码检测失败：{e}")
+        try:self.events.put(("hardware", "编码器：" + (", ".join(sorted(available_encoders(bundled_binary("ffmpeg")))) or "CPU")))
+        except Exception as e:self.events.put(("hardware", f"编码检测失败：{e}"))
     def choose(self):
         p=filedialog.askopenfilenames(title="选择视频",filetypes=[("视频文件",VIDEO_EXTS),("所有文件","*")])
         if not p:return
-        self.files=list(p); self.cuts=[]; self.preview_start=None; self._refresh_cuts(); self.file_label.config(text=f"已选择 {len(p)} 个视频：{Path(p[0]).name}" if len(p)==1 else f"已选择 {len(p)} 个视频：{Path(p[0]).name} 等"); self._load(Path(p[0]))
+        self.files=list(p); self.cuts=[]; self.preview_start=None; self.output_files=[]; self._refresh_cuts(); self.file_label.config(text=f"已选择 {len(p)} 个视频：{Path(p[0]).name}" if len(p)==1 else f"已选择 {len(p)} 个视频：{Path(p[0]).name} 等"); self._load(Path(p[0]))
     def _load(self,p):
         try:
             info=probe(p,bundled_binary("ffprobe"),bundled_binary("ffmpeg")); self.src_info=info; v=next(s for s in info["streams"] if s.get("codec_type")=="video"); w,h=int(v["width"]),int(v["height"]); self.src_ratio=w/h; self.src_duration=float((info.get("format") or {}).get("duration") or 0); self._set_size(w,h); self.duration_label.config(text=f"视频时长：{self.fmt_time(self.src_duration)}"); self.preview_btn.config(state="normal"); self.write(f"检测成功：{w}×{h} · {self._fps(v):.1f} FPS · {self.fmt_time(self.src_duration)}"); self._estimate()
@@ -83,7 +84,7 @@ class App(tk.Tk):
     def start(self):
         if self.running:return
         if not self.files or not self.src_info:messagebox.showinfo("提示","请先选择并成功读取视频");return
-        self.running=True; self.start_btn.config(state="disabled"); self.stop_btn.config(state="normal"); self.open_btn.config(state="disabled"); self.progress.config(value=0); self.progress_text.config(text="正在压缩…"); threading.Thread(target=self._worker,daemon=True).start()
+        self.running=True; self.start_btn.config(state="disabled"); self.stop_btn.config(state="normal"); self.open_btn.config(state="disabled"); self.output_files=[]; self.progress.config(value=0); self.progress_text.config(text="正在压缩…"); threading.Thread(target=self._worker,daemon=True).start()
     def stop(self):
         if self.current_process and self.current_process.poll() is None:
             try:self.current_process.terminate()
@@ -106,7 +107,7 @@ class App(tk.Tk):
                 has_audio=any(s.get("codec_type")=="audio" for s in info.get("streams",[])); duration=float((info.get("format") or {}).get("duration") or 0); cuts=self.cuts if idx==1 else []
                 if self.out_dir.get()=="与原视频同目录": out_dir=src.parent
                 else: out_dir=Path(self.out_dir.get())
-                out_dir.mkdir(parents=True,exist_ok=True); dst=out_dir/(src.stem+"_压缩.mp4"); self.write(f"开始：{src.name} · {sw}×{sh} · {sf:.1f} FPS"); cmd=build_command(src,dst,codec,PRESET_LABELS[self.preset.get()],fps=tf,width=w,height=h,keep_aspect=True,invert=self.invert.get(),src_w=sw,src_h=sh,encoder=encoder,ffmpeg=ffmpeg,board_optimized=self.board.get(),cuts=cuts,duration=duration,has_audio=has_audio)
+                out_dir.mkdir(parents=True,exist_ok=True); dst=out_dir/(src.stem+"_压缩.mp4"); self.events.put(("log",f"开始：{src.name} · {sw}×{sh} · {sf:.1f} FPS")); cmd=build_command(src,dst,codec,PRESET_LABELS[self.preset.get()],fps=tf,width=w,height=h,keep_aspect=True,invert=self.invert.get(),src_w=sw,src_h=sh,encoder=encoder,ffmpeg=ffmpeg,board_optimized=self.board.get(),cuts=cuts,duration=duration,has_audio=has_audio)
                 cmd[2:2]=["-progress","pipe:1","-nostats"]; self.current_process=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding="utf-8",errors="replace",bufsize=1,**hidden_kwargs())
                 for line in self.current_process.stdout:
                     line=line.strip()
@@ -126,6 +127,7 @@ class App(tk.Tk):
             while True:
                 ev=self.events.get_nowait(); kind=ev[0]
                 if kind=="log":self.write(ev[1])
+                elif kind=="hardware":self.hardware.config(text=ev[1])
                 elif kind=="status":self.progress_text.config(text=ev[1])
                 elif kind=="progress":self.progress.config(value=max(0,min(100,ev[1])))
                 elif kind=="done":self.write(f"完成：{Path(ev[1]).name}"); self.progress.config(value=ev[2]/ev[3]*100)
