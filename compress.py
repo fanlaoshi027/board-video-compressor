@@ -81,26 +81,32 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     if width is None or height is None:raise ValueError("宽度和高度必须至少指定一个")
     return max(2,width-width%2),max(2,height-height%2)
 
-def _smart_invert_filter():
-    # 板书场景：白底转约90%黑，黑字转白；保持色度通道，避免彩色变补色。
-    return "lutyuv=y='235-(val*235/255)':u='val':v='val'"
-
+def _smart_invert_filter():return "lutyuv=y='235-(val*235/255)':u='val':v='val'"
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
 
-def _cut_filter(cuts,duration,has_audio=False):
-    normalized=[]
+def normalize_cuts(cuts,duration):
+    """限制、排序并合并用户选择的删除区间，供界面确认和 FFmpeg 共用。"""
+    duration=max(0.0,float(duration)); items=[]
     for a,b in cuts or []:
-        a=max(0.0,float(a)); b=min(float(duration),float(b))
-        if b>a:normalized.append((a,b))
-    normalized.sort(); merged=[]
-    for a,b in normalized:
-        if not merged or a>merged[-1][1]:merged.append([a,b])
+        try:a=max(0.0,min(duration,float(a))); b=max(0.0,min(duration,float(b)))
+        except (TypeError,ValueError):continue
+        if b>a:items.append((a,b))
+    items.sort(key=lambda x:(x[0],x[1])); merged=[]
+    for a,b in items:
+        if not merged or a>merged[-1][1]+0.001:merged.append([a,b])
         else:merged[-1][1]=max(merged[-1][1],b)
-    kept=[]; cur=0.0
+    return [(a,b) for a,b in merged]
+
+def remaining_segments(cuts,duration):
+    duration=max(0.0,float(duration)); merged=normalize_cuts(cuts,duration); kept=[]; cur=0.0
     for a,b in merged:
-        if a>cur:kept.append((cur,a))
+        if a>cur+0.001:kept.append((cur,a))
         cur=max(cur,b)
-    if cur<duration:kept.append((cur,duration))
+    if cur<duration-0.001:kept.append((cur,duration))
+    return kept
+
+def _cut_filter(cuts,duration,has_audio=False):
+    kept=remaining_segments(cuts,duration)
     if not kept:raise ValueError("裁切后没有剩余视频内容")
     parts=[]
     for i,(a,b) in enumerate(kept):
