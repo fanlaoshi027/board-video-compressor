@@ -37,7 +37,7 @@ def hidden_kwargs():
 
 
 class PreviewWindow(tk.Toplevel):
-    """可靠的轻量预览：播放时只启动一个 FFmpeg 管道，暂停/拖动时停止并按时间重新定位。"""
+    """简单预览：播放和拖动只用于找到时间点，裁切按钮只记录时间。"""
 
     FPS = 12
 
@@ -53,7 +53,6 @@ class PreviewWindow(tk.Toplevel):
         self.photo = None
         self.preview_proc = None
         self.generation = 0
-        self.seek_job = None
 
         v = next(s for s in info.get("streams", []) if s.get("codec_type") == "video")
         src_w, src_h = int(v["width"]), int(v["height"])
@@ -93,7 +92,7 @@ class PreviewWindow(tk.Toplevel):
         self.status = tk.Label(self, text="预览就绪", bg="#111", fg="#aaa", anchor="w")
         self.status.pack(fill="x", padx=12, pady=(0, 8))
         self.update_time()
-        self.seek_to(self.pos, autoplay=False)
+        self._show_single_frame(0.0)
 
     def fmt(self, x):
         x = max(0.0, float(x)); h = int(x // 3600); m = int((x % 3600) // 60); s = int(x % 60)
@@ -124,8 +123,10 @@ class PreviewWindow(tk.Toplevel):
         return bytes(data)
 
     def _start_process(self, start):
-        self._stop_process(); self.generation += 1; generation = self.generation
-        cmd = [bundled_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", str(self.path), "-an", "-vf", f"scale={self.frame_w}:{self.frame_h},fps={self.FPS}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
+        self._stop_process()
+        self.generation += 1
+        generation = self.generation
+        cmd = [bundled_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-re", "-ss", f"{start:.3f}", "-i", str(self.path), "-an", "-vf", f"scale={self.frame_w}:{self.frame_h},fps={self.FPS}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
         try:
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=self.frame_bytes * 2, **hidden_kwargs())
         except Exception as e:
@@ -139,25 +140,35 @@ class PreviewWindow(tk.Toplevel):
             while generation == self.generation and proc.poll() is None:
                 raw = self._read_exact(proc.stdout, self.frame_bytes)
                 if raw is None: break
-                frame_pos = min(self.duration, start + frame_index / self.FPS); frame_index += 1
-                if Image:
-                    img = Image.frombytes("RGB", (self.frame_w, self.frame_h), raw)
-                    photo = ImageTk.PhotoImage(img)
-                    self.after(0, lambda photo=photo, pos=frame_pos, gen=generation: self._show_frame(photo, pos, gen))
+                frame_pos = min(self.duration, start + frame_index / self.FPS)
+                frame_index += 1
+                self.after(0, lambda raw=raw, pos=frame_pos, gen=generation: self._show_raw_frame(raw, pos, gen))
         except Exception:
             pass
         finally:
-            if generation == self.generation:
+            if generation == self.generation and self.winfo_exists():
                 self.after(0, lambda gen=generation: self._playback_finished(gen))
 
-    def _show_frame(self, photo, pos, generation):
-        if not self.winfo_exists() or generation != self.generation: return
-        self.photo = photo; self.pos = pos; self.canvas.config(image=photo, text=""); self.update_time()
+    def _show_raw_frame(self, raw, pos, generation):
+        if not self.winfo_exists() or generation != self.generation or not self.playing or not Image:
+            return
+        try:
+            img = Image.frombytes("RGB", (self.frame_w, self.frame_h), raw)
+            self.photo = ImageTk.PhotoImage(img)
+            self.canvas.config(image=self.photo, text="")
+            self.pos = pos
+            self.update_time()
+        except Exception:
+            pass
 
     def _playback_finished(self, generation):
         if not self.winfo_exists() or generation != self.generation: return
+        self.preview_proc = None
+        self.playing = False
         if self.pos >= self.duration - 0.05: self.pos = self.duration
-        self.playing = False; self.preview_proc = None; self.play_btn.config(text="▶ 播放"); self.status.config(text="预览结束")
+        self.play_btn.config(text="▶ 播放")
+        self.status.config(text="预览结束")
+        self.update_time()
 
     def toggle_play(self):
         if self.playing:
@@ -166,59 +177,112 @@ class PreviewWindow(tk.Toplevel):
         self.playing = True; self.play_btn.config(text="⏸ 暂停"); self.status.config(text="正在播放…"); self._start_process(self.pos)
 
     def on_seek_press(self, _event=None):
-        self.dragging = True; self.was_playing = self.playing
-        if self.playing:
-            self.playing = False; self.play_btn.config(text="▶ 播放"); self._stop_process()
+        self.dragging = True
+        self.was_playing = self.playing
+        self.playing = False
+        self.play_btn.config(text="▶ 播放")
+        self._stop_process()
+        self.status.config(text="拖动中…")
 
     def on_seek(self, value):
-        self.pos = min(self.duration, max(0.0, float(value))); self.update_time()
-        if not self.dragging: self.seek_to(self.pos, autoplay=self.was_playing)
+        self.pos = min(self.duration, max(0.0, float(value)))
+        self.update_time()
 
     def on_seek_release(self, _event=None):
-        self.dragging = False; self.seek_to(self.pos, autoplay=self.was_playing); self.was_playing = False
-
-    def seek_to(self, pos, autoplay=False):
-        if self.seek_job:
-            try: self.after_cancel(self.seek_job)
-            except Exception: pass
-        self.seek_job = self.after(100, lambda: self._seek_now(pos, autoplay))
+        self.dragging = False
+        was_playing = self.was_playing
+        self.was_playing = False
+        self._seek_now(self.pos, autoplay=was_playing)
 
     def _seek_now(self, pos, autoplay=False):
-        self.seek_job = None; self.pos = min(self.duration, max(0.0, float(pos))); self.update_time()
+        if not self.winfo_exists(): return
+        self._stop_process()
+        self.pos = min(self.duration, max(0.0, float(pos)))
+        self.update_time()
         if autoplay:
-            self.playing = True; self.play_btn.config(text="⏸ 暂停"); self._start_process(self.pos); return
-        self._stop_process(); self.generation += 1; generation = self.generation
-        cmd = [bundled_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", f"{self.pos:.3f}", "-i", str(self.path), "-frames:v", "1", "-vf", f"scale={self.frame_w}:{self.frame_h}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
-        try: p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **hidden_kwargs())
-        except Exception as e: self.status.config(text=f"定位失败：{e}"); return
-        def one_frame():
+            self.playing = True
+            self.play_btn.config(text="⏸ 暂停")
+            self.status.config(text="正在播放…")
+            self._start_process(self.pos)
+        else:
+            self.playing = False
+            self.play_btn.config(text="▶ 播放")
+            self._show_single_frame(self.pos)
+
+    def _show_single_frame(self, pos):
+        if not self.winfo_exists(): return
+        self._stop_process()
+        generation = self.generation
+        cmd = [bundled_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", f"{pos:.3f}", "-i", str(self.path), "-frames:v", "1", "-vf", f"scale={self.frame_w}:{self.frame_h}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **hidden_kwargs())
+        except Exception as e:
+            self.status.config(text=f"定位失败：{e}"); return
+        self.preview_proc = p
+
+        def worker():
+            raw = None
             try:
-                raw = self._read_exact(p.stdout, self.frame_bytes); p.terminate()
-                if raw and Image:
-                    img = Image.frombytes("RGB", (self.frame_w, self.frame_h), raw); photo = ImageTk.PhotoImage(img)
-                    self.after(0, lambda: self._show_frame(photo, self.pos, generation))
-            except Exception: pass
-        threading.Thread(target=one_frame, daemon=True).start()
+                raw = self._read_exact(p.stdout, self.frame_bytes)
+            except Exception:
+                pass
+            finally:
+                try: p.stdout.close()
+                except Exception: pass
+                try: p.wait(timeout=0.5)
+                except Exception:
+                    try: p.kill()
+                    except Exception: pass
+            if raw and generation == self.generation and self.winfo_exists():
+                self.after(0, lambda raw=raw, pos=pos, gen=generation: self._show_seek_frame(raw, pos, gen))
+            if self.preview_proc is p:
+                self.preview_proc = None
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_seek_frame(self, raw, pos, generation):
+        if not self.winfo_exists() or generation != self.generation or not Image: return
+        try:
+            img = Image.frombytes("RGB", (self.frame_w, self.frame_h), raw)
+            self.photo = ImageTk.PhotoImage(img)
+            self.canvas.config(image=self.photo, text="")
+            self.pos = pos
+            self.update_time()
+            self.status.config(text="预览就绪")
+        except Exception:
+            pass
 
     def set_start(self):
-        self.app.preview_start = self.pos; self.update_selection()
+        self.app.preview_start = self.pos
+        self.update_selection()
 
     def set_end(self):
         if self.app.preview_start is None:
-            self.app.preview_start = self.pos; self.update_selection(); return
+            self.app.preview_start = self.pos
+            self.update_selection()
+            return
         a, b = sorted((self.app.preview_start, self.pos))
         if b <= a:
             messagebox.showwarning("删除区间", "结束位置必须大于开始位置", parent=self); return
-        self.app.cuts.append((a, b)); self.app.cuts.sort(); self.app._refresh_cuts(); self.app.preview_start = None; self.update_selection()
+        self.app.cuts.append((a, b))
+        self.app.cuts.sort()
+        self.app._refresh_cuts()
+        self.app.preview_start = None
+        self.update_selection()
 
-    def clear_selection(self): self.app.preview_start = None; self.update_selection()
+    def clear_selection(self):
+        self.app.preview_start = None
+        self.update_selection()
 
     def update_selection(self):
         a = self.app.preview_start
         self.selection.config(text=f"开始：{self.fmt(a)}，移动指针后点击“设置结束”" if a is not None else (self.app.cut_text() or "未选择删除区间"))
 
     def close(self):
-        self.playing = False; self._stop_process(); self.destroy()
+        self.playing = False
+        self._stop_process()
+        try: self.destroy()
+        except Exception: pass
 
 
 class App(tk.Tk):
@@ -248,7 +312,7 @@ class App(tk.Tk):
         try: self.hardware.config(text="编码器："+(", ".join(sorted(available_encoders(bundled_binary("ffmpeg")))) or "CPU"))
         except Exception as e: self.hardware.config(text=f"编码检测失败：{e}")
     def choose(self):
-        p=filedialog.askopenfilenames(title="选择视频",filetypes=[("视频文件",VIDEO_EXTS),("所有文件","*")]);
+        p=filedialog.askopenfilenames(title="选择视频",filetypes=[("视频文件",VIDEO_EXTS),("所有文件","*")])
         if not p:return
         self.files=list(p); self.cuts=[]; self.preview_start=None; self._refresh_cuts(); self.file_label.config(text=f"已选择 {len(p)} 个视频：{Path(p[0]).name}" if len(p)==1 else f"已选择 {len(p)} 个视频：{Path(p[0]).name} 等"); self._load(Path(p[0]))
     def _load(self,p):
@@ -265,7 +329,7 @@ class App(tk.Tk):
         if self.src_info:
             v=next(s for s in self.src_info["streams"] if s.get("codec_type")=="video"); self._set_size(int(v["width"]),int(v["height"])); self.keep.set(True); self._estimate()
     def choose_output(self):
-        p=filedialog.askdirectory(title="选择输出目录");
+        p=filedialog.askdirectory(title="选择输出目录")
         if p:self.out_dir.set(p)
     def fmt_time(self,x):
         x=max(0.0,float(x)); h=int(x//3600); m=int((x%3600)//60); s=int(x%60); return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
