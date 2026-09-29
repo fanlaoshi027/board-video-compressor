@@ -50,22 +50,20 @@ class PreviewWindow(_BasePreviewWindow):
 
     def _keyboard_seek(self, delta):
         target = min(self.duration, max(0.0, self.pos + delta))
-        was_playing = self.playing
+        was_playing = bool(self.playing)
         self.playing = False
         self.play_btn.config(text="▶ 播放")
-        self._stop_process()
+        self._stop_proc()
         self.seek_to(target, autoplay=was_playing)
 
     def _keyboard_seek_to(self, target):
-        was_playing = self.playing
+        was_playing = bool(self.playing)
         self.playing = False
         self.play_btn.config(text="▶ 播放")
-        self._stop_process()
+        self._stop_proc()
         self.seek_to(target, autoplay=was_playing)
 
 
-# App.open_preview() 使用 app 模块的 PreviewWindow 全局变量。
-# 在 Windows 入口替换为增强版预览，不修改压缩主流程。
 _app.PreviewWindow = PreviewWindow
 App = _app.App
 
