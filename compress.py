@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """樊老师板书视频压缩核心。"""
 from __future__ import annotations
-import argparse, json, re, shutil, subprocess
+import argparse, json, re, shutil, subprocess, builtins
 from pathlib import Path
 from size_estimator import estimate_output_size, format_bytes
+try:
+    from preview_window import PreviewWindow
+    builtins.PreviewWindow = PreviewWindow
+except Exception:
+    pass
 
 PRESETS={"board-high":{"crf":24,"fps":30,"preset":"slow"},"board-balanced":{"crf":27,"fps":15,"preset":"slow"},"board-extreme":{"crf":30,"fps":15,"preset":"slow"}}
 CODECS={"h264":"libx264","h265":"libx265","av1":"libsvtav1"}; HARDWARE_CODECS={"h264_qsv":"h264_qsv","hevc_qsv":"hevc_qsv","av1_qsv":"av1_qsv"}
@@ -83,8 +88,7 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
 
 def _smart_invert_filter():
     """板书反色：接近白色的像素压到约10%亮度；有色笔迹尽量保持原色。"""
-    # 用 RGB 亮度/色度判定“接近白色”，只改变高亮、低饱和区域；彩色区域保持原样。
-    return "format=rgb24,lutrgb=r='if(gt(max(max(r,g),b)-min(min(r,g),b),35),r,if(gt((r+g+b)/3,210),25, r))':g='if(gt(max(max(r,g),b)-min(min(r,g),b),35),g,if(gt((r+g+b)/3,210),25,g))':b='if(gt(max(max(r,g),b)-min(min(r,g),b),35),b,if(gt((r+g+b)/3,210),25,b))'"
+    return "format=rgb24,lutrgb=r='if(gt(max(max(r,g),b)-min(min(r,g),b),35),r,if(gt((r+g+b)/3,210),25,r))':g='if(gt(max(max(r,g),b)-min(min(r,g),b),35),g,if(gt((r+g+b)/3,210),25,g))':b='if(gt(max(max(r,g),b)-min(min(r,g),b),35),b,if(gt((r+g+b)/3,210),25,b))'"
 
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
 
