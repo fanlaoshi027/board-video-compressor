@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
-from pathlib import Path
-
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox
 
 try:
@@ -14,7 +14,7 @@ except ImportError:
 
 
 class ReliablePreviewWindow(tk.Toplevel):
-    """稳定的视频预览：单一播放管道、最新帧缓冲、拖动时不启动 FFmpeg。"""
+    """简单预览：播放/暂停和时间轴只用于找时间点，裁切只记录时间。"""
 
     FPS = 12
 
@@ -25,21 +25,17 @@ class ReliablePreviewWindow(tk.Toplevel):
         self.duration = max(0.0, float(duration))
         self.pos = 0.0
         self.playing = False
-        self.dragging = False
         self.was_playing = False
+        self.dragging = False
         self.photo = None
-        self.preview_proc = None
-        self.seek_proc = None
-        self.generation = 0
+        self.proc = None
         self.seek_job = None
-        self.ui_job = None
-        self.frame_lock = threading.Lock()
-        self.pending_frame = None
         self.closed = False
+        self.token = 0
 
         v = next(s for s in info.get("streams", []) if s.get("codec_type") == "video")
         src_w, src_h = int(v["width"]), int(v["height"])
-        self.frame_w = min(800, max(320, src_w))
+        self.frame_w = min(960, max(480, src_w))
         self.frame_h = max(2, int(round(self.frame_w * src_h / src_w)))
         if self.frame_h % 2:
             self.frame_h -= 1
@@ -91,32 +87,50 @@ class ReliablePreviewWindow(tk.Toplevel):
         self.scale.set(min(self.duration, max(0.0, self.pos)))
         self.time_label.config(text=f"{self.fmt(self.pos)} / {self.fmt(self.duration)}")
 
-    def _stop_process(self):
-        self.generation += 1
-        with self.frame_lock:
-            self.pending_frame = None
-        p = self.preview_proc
-        self.preview_proc = None
+    def _stop_proc(self):
+        self.token += 1
+        p = self.proc
+        self.proc = None
         if p and p.poll() is None:
             try:
                 p.terminate()
-                p.wait(timeout=0.5)
+                p.wait(timeout=0.4)
             except Exception:
                 try:
                     p.kill()
                 except Exception:
                     pass
-        p = self.seek_proc
-        self.seek_proc = None
-        if p and p.poll() is None:
+
+    def _start_playback(self, start):
+        self._stop_proc()
+        token = self.token
+        cmd = [self._binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-re", "-ss", f"{start:.3f}", "-i", str(self.path), "-an", "-vf", f"scale={self.frame_w}:{self.frame_h},fps={self.FPS}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=self.frame_bytes * 2, **self._hidden_kwargs())
+        except Exception as e:
+            self.playing = False
+            self.play_btn.config(text="▶ 播放")
+            self.status.config(text=f"预览启动失败：{e}")
+            return
+        self.proc = p
+
+        def worker():
+            index = 0
             try:
-                p.terminate()
-                p.wait(timeout=0.5)
+                while not self.closed and token == self.token and p.poll() is None:
+                    raw = self._read_exact(p.stdout, self.frame_bytes)
+                    if not raw:
+                        break
+                    pos = min(self.duration, start + index / self.FPS)
+                    index += 1
+                    self.after(0, lambda r=raw, t=pos, g=token: self._show_frame(r, t, g))
             except Exception:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+                pass
+            finally:
+                if token == self.token and not self.closed:
+                    self.after(0, lambda g=token: self._finished(g))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _read_exact(self, stream, size):
         data = bytearray()
@@ -127,98 +141,33 @@ class ReliablePreviewWindow(tk.Toplevel):
             data.extend(chunk)
         return bytes(data)
 
-    def _start_process(self, start):
-        self._stop_process()
-        self.generation += 1
-        generation = self.generation
-        cmd = [
-            self._binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-re",
-            "-ss", f"{start:.3f}", "-i", str(self.path), "-an",
-            "-vf", f"scale={self.frame_w}:{self.frame_h},fps={self.FPS}",
-            "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
-        ]
-        try:
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=self.frame_bytes * 2, **self._hidden_kwargs())
-        except Exception as e:
-            self.status.config(text=f"预览启动失败：{e}")
-            self.playing = False
-            self.play_btn.config(text="▶ 播放")
-            return
-        self.preview_proc = p
-        threading.Thread(target=self._reader, args=(p, generation, start), daemon=True).start()
-
-    def _reader(self, proc, generation, start):
-        frame_index = 0
-        try:
-            while generation == self.generation and proc.poll() is None and not self.closed:
-                raw = self._read_exact(proc.stdout, self.frame_bytes)
-                if raw is None:
-                    break
-                frame_pos = min(self.duration, start + frame_index / self.FPS)
-                frame_index += 1
-                with self.frame_lock:
-                    if generation == self.generation:
-                        self.pending_frame = (raw, frame_pos, generation)
-                self._schedule_ui()
-        except Exception:
-            pass
-        finally:
-            if generation == self.generation and not self.closed:
-                self.after(0, lambda g=generation: self._playback_finished(g))
-
-    def _schedule_ui(self):
-        if self.closed:
+    def _show_frame(self, raw, pos, token):
+        if self.closed or token != self.token or not self.playing or not Image:
             return
         try:
-            if self.ui_job is None:
-                self.ui_job = self.after(15, self._consume_latest_frame)
+            img = Image.frombytes("RGB", (self.frame_w, self.frame_h), raw)
+            self.photo = ImageTk.PhotoImage(img)
+            self.canvas.config(image=self.photo, text="")
+            self.pos = pos
+            self.update_time()
         except Exception:
             pass
 
-    def _consume_latest_frame(self):
-        self.ui_job = None
-        if self.closed:
+    def _finished(self, token):
+        if self.closed or token != self.token:
             return
-        with self.frame_lock:
-            item = self.pending_frame
-            self.pending_frame = None
-        if not item:
-            return
-        raw, pos, generation = item
-        if generation != self.generation or not self.playing:
-            return
-        if Image:
-            try:
-                img = Image.frombytes("RGB", (self.frame_w, self.frame_h), raw)
-                photo = ImageTk.PhotoImage(img)
-                self._show_frame(photo, pos, generation)
-            except Exception:
-                pass
-
-    def _show_frame(self, photo, pos, generation):
-        if self.closed or generation != self.generation:
-            return
-        self.photo = photo
-        self.pos = min(self.duration, max(0.0, pos))
-        self.canvas.config(image=photo, text="")
-        self.update_time()
-
-    def _playback_finished(self, generation):
-        if self.closed or generation != self.generation:
-            return
-        self.preview_proc = None
-        if self.pos >= self.duration - 0.05:
-            self.pos = self.duration
+        self.proc = None
         self.playing = False
         self.play_btn.config(text="▶ 播放")
-        self.status.config(text="预览结束")
+        self.pos = self.duration
         self.update_time()
+        self.status.config(text="预览结束")
 
     def toggle_play(self):
         if self.playing:
             self.playing = False
             self.play_btn.config(text="▶ 播放")
-            self._stop_process()
+            self._stop_proc()
             self.status.config(text="已暂停")
             return
         if self.pos >= self.duration - 0.05:
@@ -226,27 +175,24 @@ class ReliablePreviewWindow(tk.Toplevel):
         self.playing = True
         self.play_btn.config(text="⏸ 暂停")
         self.status.config(text="正在播放…")
-        self._start_process(self.pos)
+        self._start_playback(self.pos)
 
     def on_seek_press(self, _event=None):
-        self.dragging = True
         self.was_playing = self.playing
-        if self.playing:
-            self.playing = False
-            self.play_btn.config(text="▶ 播放")
-        self._stop_process()
+        self.playing = False
+        self.play_btn.config(text="▶ 播放")
+        self._stop_proc()
         self.status.config(text="正在定位…")
 
     def on_seek(self, value):
-        if self.closed:
-            return
-        self.pos = min(self.duration, max(0.0, float(value)))
-        self.update_time()
+        if not self.closed:
+            self.pos = min(self.duration, max(0.0, float(value)))
+            self.update_time()
 
     def on_seek_release(self, _event=None):
-        self.dragging = False
-        self.seek_to(self.pos, autoplay=self.was_playing)
+        was_playing = self.was_playing
         self.was_playing = False
+        self.seek_to(self.pos, autoplay=was_playing)
 
     def seek_to(self, pos, autoplay=False):
         if self.seek_job:
@@ -254,74 +200,69 @@ class ReliablePreviewWindow(tk.Toplevel):
                 self.after_cancel(self.seek_job)
             except Exception:
                 pass
-            self.seek_job = None
-        self.seek_job = self.after(60, lambda: self._seek_now(pos, autoplay))
+        self.seek_job = self.after(80, lambda: self._seek_now(pos, autoplay))
 
     def _seek_now(self, pos, autoplay=False):
         self.seek_job = None
         if self.closed:
             return
-        self._stop_process()
+        self._stop_proc()
         self.pos = min(self.duration, max(0.0, float(pos)))
         self.update_time()
         if autoplay:
             self.playing = True
             self.play_btn.config(text="⏸ 暂停")
             self.status.config(text="正在播放…")
-            self._start_process(self.pos)
-            return
-        self.playing = False
-        self.play_btn.config(text="▶ 播放")
-        self._show_single_frame(self.pos)
+            self._start_playback(self.pos)
+        else:
+            self.playing = False
+            self.play_btn.config(text="▶ 播放")
+            self._show_single_frame(self.pos)
 
     def _show_single_frame(self, pos):
-        self._stop_process()
-        self.generation += 1
-        generation = self.generation
-        cmd = [
-            self._binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", f"{pos:.3f}",
-            "-i", str(self.path), "-frames:v", "1", "-vf", f"scale={self.frame_w}:{self.frame_h}",
-            "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
-        ]
+        self._stop_proc()
+        token = self.token
+        cmd = [self._binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-ss", f"{pos:.3f}", "-i", str(self.path), "-frames:v", "1", "-vf", f"scale={self.frame_w}:{self.frame_h}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
         try:
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **self._hidden_kwargs())
         except Exception as e:
             self.status.config(text=f"定位失败：{e}")
             return
-        self.seek_proc = p
+        self.proc = p
 
-        def worker(proc=p, g=generation):
+        def worker():
             try:
-                raw = self._read_exact(proc.stdout, self.frame_bytes)
-                if raw and g == self.generation and not self.closed and Image:
-                    self.after(0, lambda: self._display_single(raw, pos, g))
+                raw = self._read_exact(p.stdout, self.frame_bytes)
+                if raw and token == self.token and not self.closed and Image:
+                    self.after(0, lambda r=raw, g=token: self._display_single(r, pos, g))
             except Exception:
                 pass
             finally:
                 try:
-                    proc.stdout.close()
+                    p.stdout.close()
                 except Exception:
                     pass
                 try:
-                    proc.terminate()
-                    proc.wait(timeout=0.3)
+                    p.wait(timeout=0.5)
                 except Exception:
                     try:
-                        proc.kill()
+                        p.kill()
                     except Exception:
                         pass
-                if self.seek_proc is proc:
-                    self.seek_proc = None
+                if self.proc is p:
+                    self.proc = None
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _display_single(self, raw, pos, generation):
-        if self.closed or generation != self.generation or not Image:
+    def _display_single(self, raw, pos, token):
+        if self.closed or token != self.token or not Image:
             return
         try:
             img = Image.frombytes("RGB", (self.frame_w, self.frame_h), raw)
             self.photo = ImageTk.PhotoImage(img)
-            self._show_frame(self.photo, pos, generation)
+            self.canvas.config(image=self.photo, text="")
+            self.pos = pos
+            self.update_time()
             self.status.config(text="预览就绪")
         except Exception:
             pass
@@ -358,31 +299,24 @@ class ReliablePreviewWindow(tk.Toplevel):
             return
         self.closed = True
         self.playing = False
-        if self.ui_job:
-            try:
-                self.after_cancel(self.ui_job)
-            except Exception:
-                pass
-            self.ui_job = None
         if self.seek_job:
             try:
                 self.after_cancel(self.seek_job)
             except Exception:
                 pass
             self.seek_job = None
-        self._stop_process()
+        self._stop_proc()
         self.destroy()
 
     def _binary(self, name):
         try:
             return self.app._bundled_binary(name)
         except Exception:
-            suffix = ".exe" if __import__("sys").platform.startswith("win") else ""
-            p = Path(getattr(__import__("sys"), "_MEIPASS", Path(__file__).resolve().parent)) / "bin" / f"{name}{suffix}"
+            suffix = ".exe" if sys.platform.startswith("win") else ""
+            p = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "bin" / f"{name}{suffix}"
             return str(p) if p.exists() else name
 
     def _hidden_kwargs(self):
-        import sys
         if sys.platform.startswith("win"):
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
