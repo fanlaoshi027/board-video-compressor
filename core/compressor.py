@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Callable, Optional
 import subprocess
 
+try:
+    from .vfr_engine import build_vfr_args
+except ImportError:
+    build_vfr_args = None
+
 
 @dataclass
 class CompressOptions:
@@ -14,6 +19,7 @@ class CompressOptions:
     min_fps: float = 2.0
     smart_invert: bool = False
     crf: int = 25
+    enable_vfr: bool = True
 
 
 @dataclass
@@ -29,25 +35,36 @@ class CompressResult:
 
 def build_ffmpeg_command(input_file: str, output_file: str, options: CompressOptions):
     """生成板书视频专用 FFmpeg 命令。"""
-    codec = "libx265" if options.codec.lower() == "h265" else "libx264"
+    cmd = ["ffmpeg", "-y", "-i", str(input_file)]
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", str(input_file),
+    filters = []
+
+    if options.enable_vfr and build_vfr_args:
+        vfr_args = build_vfr_args(
+            min_fps=options.min_fps,
+            max_fps=options.max_fps,
+        )
+        filters.extend(vfr_args)
+
+    if options.smart_invert:
+        filters.append("smart_invert")
+
+    if filters:
+        cmd += ["-vf", ",".join(filters)]
+
+    codec = "libx265" if options.codec == "h265" else "libx264"
+
+    cmd += [
         "-c:v", codec,
         "-crf", str(options.crf),
         "-preset", "medium",
         "-c:a", "aac",
         "-b:a", "128k",
         "-movflags", "+faststart",
+        "-fps_mode", "vfr" if options.enable_vfr else "cfr",
+        str(output_file),
     ]
 
-    # VFR 时间轴将在 vfr_engine 接入后注入。
-    if options.smart_invert:
-        cmd += ["-vf", "smart_invert"]
-
-    cmd.append(str(output_file))
     return cmd
 
 
@@ -66,9 +83,9 @@ def compress_video(
         return CompressResult(str(src), str(dst), False, "输入文件不存在")
 
     if progress:
-        progress("生成 FFmpeg 编码参数")
+        progress("生成板书 VFR 编码参数")
 
-    cmd = build_ffmpeg_command(str(src), str(dst), options)
+    cmd = build_ffmpeg_command(src, dst, options)
 
     if progress:
         progress("开始 H.265 板书压缩")
@@ -79,8 +96,5 @@ def compress_video(
             return CompressResult(str(src), str(dst), False, result.stderr[-500:])
     except Exception as e:
         return CompressResult(str(src), str(dst), False, str(e))
-
-    if progress:
-        progress("压缩完成")
 
     return CompressResult(str(src), str(dst), True, "压缩完成")
