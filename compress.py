@@ -82,8 +82,10 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
     return max(2,width-width%2),max(2,height-height%2)
 
 def _smart_invert_filter():
-    # 板书场景：白底转约90%黑，黑字转白；保持色度通道，避免彩色变补色。
-    return "lutyuv=y='235-(val*235/255)':u='val':v='val'"
+    # 只反转接近中性的白/灰/黑像素；高饱和度彩色笔迹原样保留。
+    # 白色约变为 10% 亮度，黑色约变为 94% 亮度，避免彩色笔变成补色。
+    expr="if(lt(abs(r-g)+abs(g-b)+abs(b-r),72),10+(255-r)*0.90,r)"
+    return f"lutrgb=r='{expr}':g='{expr.replace('r','g')}':b='{expr.replace('r','b')}'"
 
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
 
@@ -119,7 +121,7 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     if board_optimized:vf.append(_board_filter())
     qsv=encoder in {"hevc_qsv","h264_qsv","av1_qsv"}
     if qsv:vf.append("format=nv12")
-    gop=max(30,int(target_fps*5)); vf_expr=','.join(vf) if vf else "null"; pix_fmt="nv12" if qsv else "yuv420p"; cuts=cuts or []
+    gop=max(30,int(target_fps*5)); vf_expr=','.join(vf) if vf else "null"; cuts=cuts or []
     if cuts:
         graph=_cut_filter(cuts,float(duration),has_audio=has_audio); post=','.join(vf) if vf else "null"; graph+=f";[outv]{post}[vout]"; cmd=[ffmpeg,"-hide_banner","-loglevel","error","-y","-i",str(input_path),"-filter_complex",graph,"-map","[vout]"]
         if has_audio:cmd += ["-map","[outa]"]
