@@ -1,1 +1,4 @@
 Pillow>=10.0
+av>=14.0,<17
+opencv-python>=4.10,<5
+numpy>=1.26,<3
