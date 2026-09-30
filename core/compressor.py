@@ -29,11 +29,13 @@ class CompressResult:
 
 def build_ffmpeg_command(input_file: str, output_file: str, options: CompressOptions):
     """生成板书视频专用 FFmpeg 命令。"""
+    codec = "libx265" if options.codec.lower() == "h265" else "libx264"
+
     cmd = [
         "ffmpeg",
         "-y",
         "-i", str(input_file),
-        "-c:v", "libx265",
+        "-c:v", codec,
         "-crf", str(options.crf),
         "-preset", "medium",
         "-c:a", "aac",
@@ -41,7 +43,7 @@ def build_ffmpeg_command(input_file: str, output_file: str, options: CompressOpt
         "-movflags", "+faststart",
     ]
 
-    # VFR 参数由后续 vfr_engine 注入，这里保持统一入口。
+    # VFR 时间轴将在 vfr_engine 接入后注入。
     if options.smart_invert:
         cmd += ["-vf", "smart_invert"]
 
@@ -55,7 +57,6 @@ def compress_video(
     options: Optional[CompressOptions] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> CompressResult:
-    """统一压缩入口。"""
     options = options or CompressOptions()
 
     src = Path(input_file)
@@ -67,7 +68,7 @@ def compress_video(
     if progress:
         progress("生成 FFmpeg 编码参数")
 
-    cmd = build_ffmpeg_command(src, dst, options)
+    cmd = build_ffmpeg_command(str(src), str(dst), options)
 
     if progress:
         progress("开始 H.265 板书压缩")
@@ -78,5 +79,8 @@ def compress_video(
             return CompressResult(str(src), str(dst), False, result.stderr[-500:])
     except Exception as e:
         return CompressResult(str(src), str(dst), False, str(e))
+
+    if progress:
+        progress("压缩完成")
 
     return CompressResult(str(src), str(dst), True, "压缩完成")
