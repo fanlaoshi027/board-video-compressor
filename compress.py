@@ -83,9 +83,12 @@ def calculate_output_size(width,height,src_w,src_h,keep_aspect):
 
 def _smart_invert_filter():
     # 只反转接近中性的白/灰/黑像素；高饱和度彩色笔迹原样保留。
-    # 白色约变为 10% 亮度，黑色约变为 94% 亮度，避免彩色笔变成补色。
-    expr="if(lt(abs(r-g)+abs(g-b)+abs(b-r),72),10+(255-r)*0.90,r)"
-    return f"lutrgb=r='{expr}':g='{expr.replace('r','g')}':b='{expr.replace('r','b')}'"
+    # 白色约变为 10% 亮度，黑色约变为 94% 亮度。
+    mask="lt(abs(r-g)+abs(g-b)+abs(b-r),72)"
+    r="if("+mask+",10+(255-r)*0.90,r)"
+    g="if(lt(abs(r-g)+abs(g-b)+abs(b-r),72),10+(255-g)*0.90,g)"
+    b="if(lt(abs(r-g)+abs(g-b)+abs(b-r),72),10+(255-b)*0.90,b)"
+    return f"lutrgb=r='{r}':g='{g}':b='{b}'"
 
 def _board_filter():return "unsharp=5:5:0.45:5:5:0"
 
@@ -132,7 +135,7 @@ def build_command(input_path,output_path,codec,preset_name,fps=None,width=None,h
     cmd += ["-c:v",encoder]
     if encoder in {"libx264","libx265"}:cmd += ["-preset",p["preset"],"-crf",str(p["crf"])]
     elif encoder=="libsvtav1":cmd += ["-preset","6","-crf",str(max(20,p["crf"]-2))]
-    elif encoder in {"hevc_qsv","h264_qsv","av1_qsv"}:cmd += ["-global_quality",str({"board-high":20,"board-balanced":23,"board-extreme":27}[preset_name])]
+    elif encoder in {"hevc_qsv","h264_qsv","av1_qsv"}:cmd += ["-global_quality",str({"board-high":20,"board-balanced":23,"board-extreme":27}[preset_name])
     cmd += ["-r",str(target_fps),"-fps_mode","cfr","-g",str(gop),"-keyint_min",str(max(1,int(target_fps))),"-pix_fmt",pix_fmt]
     if has_audio:cmd += ["-c:a","aac","-b:a","64k"]
     else:cmd += ["-an"]
