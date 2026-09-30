@@ -60,11 +60,13 @@ jobs:
       - name: Verify app architecture
         run: |
           file dist/BoardVideoCompressor.app/Contents/MacOS/BoardVideoCompressor
+          test -d dist/BoardVideoCompressor.app/Contents/MacOS
           codesign --force --deep --sign - dist/BoardVideoCompressor.app
       - name: Package standard macOS zip
         run: |
           ditto -c -k --sequesterRsrc --keepParent dist/BoardVideoCompressor.app dist/BoardVideoCompressor-macOS-arm64.zip
           unzip -t dist/BoardVideoCompressor-macOS-arm64.zip
+          test -s dist/BoardVideoCompressor-macOS-arm64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: BoardVideoCompressor-macOS-arm64
