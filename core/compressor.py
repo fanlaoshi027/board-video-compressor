@@ -11,6 +11,25 @@ except ImportError:
     build_vfr_args = None
 
 
+PROFILES = {
+    "teacher_board": {
+        "min_fps": 2.0,
+        "max_fps": 15.0,
+        "crf": 25,
+    },
+    "small_size": {
+        "min_fps": 1.5,
+        "max_fps": 12.0,
+        "crf": 27,
+    },
+    "high_quality": {
+        "min_fps": 5.0,
+        "max_fps": 24.0,
+        "crf": 22,
+    },
+}
+
+
 @dataclass
 class CompressOptions:
     profile: str = "teacher_board"
@@ -20,6 +39,14 @@ class CompressOptions:
     smart_invert: bool = False
     crf: int = 25
     enable_vfr: bool = True
+
+    def apply_profile(self):
+        profile = PROFILES.get(self.profile)
+        if profile:
+            self.min_fps = profile["min_fps"]
+            self.max_fps = profile["max_fps"]
+            self.crf = profile["crf"]
+        return self
 
 
 @dataclass
@@ -35,16 +62,16 @@ class CompressResult:
 
 def build_ffmpeg_command(input_file: str, output_file: str, options: CompressOptions):
     """生成板书视频专用 FFmpeg 命令。"""
+    options.apply_profile()
     cmd = ["ffmpeg", "-y", "-i", str(input_file)]
 
     filters = []
 
     if options.enable_vfr and build_vfr_args:
-        vfr_args = build_vfr_args(
+        filters.extend(build_vfr_args(
             min_fps=options.min_fps,
             max_fps=options.max_fps,
-        )
-        filters.extend(vfr_args)
+        ))
 
     if options.smart_invert:
         filters.append("smart_invert")
@@ -68,13 +95,10 @@ def build_ffmpeg_command(input_file: str, output_file: str, options: CompressOpt
     return cmd
 
 
-def compress_video(
-    input_file: str,
-    output_file: str,
-    options: Optional[CompressOptions] = None,
-    progress: Optional[Callable[[str], None]] = None,
-) -> CompressResult:
-    options = options or CompressOptions()
+def compress_video(input_file: str, output_file: str,
+                   options: Optional[CompressOptions] = None,
+                   progress: Optional[Callable[[str], None]] = None) -> CompressResult:
+    options = (options or CompressOptions()).apply_profile()
 
     src = Path(input_file)
     dst = Path(output_file)
