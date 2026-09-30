@@ -53,11 +53,19 @@ jobs:
           brew install ffmpeg
       - name: Validate
         run: python -m py_compile smart_gui.py smart_runner.py smart_invert.py smart_invert_pipeline.py compress.py
-      - name: Build
-        run: python -m PyInstaller --noconfirm --clean --windowed --name BoardVideoCompressor smart_gui.py
-      - name: Package
-        run: ditto -c -k --sequesterRsrc --keepParent dist/BoardVideoCompressor.app BoardVideoCompressor-macOS.zip
+      - name: Build Apple Silicon app
+        env:
+          ARCHFLAGS: "-arch arm64"
+        run: python -m PyInstaller --noconfirm --clean --windowed --target-architecture arm64 --name BoardVideoCompressor smart_gui.py
+      - name: Verify app architecture
+        run: |
+          file dist/BoardVideoCompressor.app/Contents/MacOS/BoardVideoCompressor
+          codesign --force --deep --sign - dist/BoardVideoCompressor.app
+      - name: Package standard macOS zip
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/BoardVideoCompressor.app dist/BoardVideoCompressor-macOS-arm64.zip
+          unzip -t dist/BoardVideoCompressor-macOS-arm64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: BoardVideoCompressor-macOS
-          path: BoardVideoCompressor-macOS.zip
+          name: BoardVideoCompressor-macOS-arm64
+          path: dist/BoardVideoCompressor-macOS-arm64.zip
