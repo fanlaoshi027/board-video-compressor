@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Optional
+import subprocess
 
 
 @dataclass
@@ -26,22 +27,36 @@ class CompressResult:
         return asdict(self)
 
 
+def build_ffmpeg_command(input_file: str, output_file: str, options: CompressOptions):
+    """生成板书视频专用 FFmpeg 命令。"""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(input_file),
+        "-c:v", "libx265",
+        "-crf", str(options.crf),
+        "-preset", "medium",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+    ]
+
+    # VFR 参数由后续 vfr_engine 注入，这里保持统一入口。
+    if options.smart_invert:
+        cmd += ["-vf", "smart_invert"]
+
+    cmd.append(str(output_file))
+    return cmd
+
+
 def compress_video(
     input_file: str,
     output_file: str,
     options: Optional[CompressOptions] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> CompressResult:
-    """统一压缩入口。
-
-    GUI、批量任务、命令行后续都调用这里。
-    实际编码器保持与现有 smart_runner/compress 模块兼容，
-    后续逐步迁移到 core 层。
-    """
+    """统一压缩入口。"""
     options = options or CompressOptions()
-
-    if progress:
-        progress("准备分析板书视频")
 
     src = Path(input_file)
     dst = Path(output_file)
@@ -49,14 +64,19 @@ def compress_video(
     if not src.exists():
         return CompressResult(str(src), str(dst), False, "输入文件不存在")
 
-    # 这里暂时作为统一入口占位。
-    # 下一步接入现有 smart_runner.run_compress。
     if progress:
-        progress(f"等待编码模块接入: {options.profile}")
+        progress("生成 FFmpeg 编码参数")
 
-    return CompressResult(
-        str(src),
-        str(dst),
-        False,
-        "core compressor created; encoder migration pending",
-    )
+    cmd = build_ffmpeg_command(src, dst, options)
+
+    if progress:
+        progress("开始 H.265 板书压缩")
+
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            return CompressResult(str(src), str(dst), False, result.stderr[-500:])
+    except Exception as e:
+        return CompressResult(str(src), str(dst), False, str(e))
+
+    return CompressResult(str(src), str(dst), True, "压缩完成")
