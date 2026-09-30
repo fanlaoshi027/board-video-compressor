@@ -18,10 +18,13 @@ def build_smart_command(src: str, out: str, *, preset="board-balanced", codec="h
         cleaned.append(base[i]); i+=1
     if "-vf" in cleaned:
         idx=cleaned.index("-vf")+1
+        existing=cleaned[idx]
         if custom_vf:
-            cleaned[idx]=custom_vf
+            # Adaptive VFR selects frames first, then keeps the normal scale,
+            # smart-invert and board-sharpen filters requested by the user.
+            cleaned[idx]=f"{custom_vf},{existing}"
         else:
-            cleaned[idx]=f"{cleaned[idx]},{build_vfr_filter(min_fps=min_fps,max_fps=max_fps)}"
+            cleaned[idx]=f"{existing},{build_vfr_filter(min_fps=min_fps,max_fps=max_fps)}"
     insert_at=cleaned.index("-c:v") if "-c:v" in cleaned else len(cleaned)
     cleaned[insert_at:insert_at]=["-fps_mode","vfr"]
     return cleaned
